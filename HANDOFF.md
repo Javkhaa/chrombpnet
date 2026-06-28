@@ -72,6 +72,7 @@ only for peak calling (fast) + the two training runs.
 - Stock chrombpnet pins `tensorflow==2.8.0`, which has **no Hopper (sm_90) kernels** → would not accelerate on H100.
 - Fix: **TF 2.15** (last release with Keras-2 default → chrombpnet code ports with zero changes; verified). Install with `tensorflow[and-cuda]==2.15.*` — it **bundles CUDA 12 libs**, which run fine under the host's **CUDA 13 driver** (backward compatible). System CUDA toolkit version is irrelevant with this install path.
 - tfp 0.23.0, numpy<2. Interpretation deps (deeplift/modisco/shap) deferred — not needed to train.
+- The repo was **migrated from `setup.py` to a uv project** (`pyproject.toml` + `uv.lock`, branch `uv-migration`). Deps are platform-marked (CUDA on linux, CPU on mac) so `uv sync` works on both; `uv lock` resolves 190 pkgs universally; `uv run` validated (imports, console scripts, package data all OK).
 
 ### 3.6 Note on Camiel2023 (if ever used)
 = Mannens et al. 2024 *Nature* (human fetal brain, 10x, ~27.6k frags/cell → 300 GB). Corpus lists ~679k cells (pre-QC) vs paper's 526,094 — apply QC, don't assume the published set.
@@ -80,19 +81,21 @@ only for peak calling (fast) + the two training runs.
 
 ## 4. Where everything lives
 
-### Code — fork: https://github.com/Javkhaa/chrombpnet  (branch `nucleosome-head`)
+### Code — fork: https://github.com/Javkhaa/chrombpnet
+Branches: `nucleosome-head` (feature code) and **`uv-migration`** (feature code + uv build; use this one on the VM).
+- `pyproject.toml` + `uv.lock` — **uv project**. TF is platform-marked: `tensorflow[and-cuda]` on linux (H100), plain `tensorflow` on mac (dev). Optional extras: `peaks` (macs2), `interpret`, `report`.
 - `chrombpnet/training/models/multitask_nucleosome_model.py` — shared trunk + 2 heads.
-- `chrombpnet/multitask/build_label_tracks.py` — build dyad (head-2) / cut-site bigwigs from fragments.
+- `chrombpnet/multitask/build_label_tracks.py` — build dyad (head-2) / cut-site bigwigs (entry point `chrombpnet-build-tracks`).
 - `chrombpnet/multitask/data_generator.py` — `MultiTaskBatchGenerator` (two bigwigs, shared crop+revcomp).
-- `chrombpnet/multitask/train_multitask.py` — training entry.
+- `chrombpnet/multitask/train_multitask.py` — training entry (`chrombpnet-train-multitask`).
 - `tests/smoke_test_pipeline.py` — end-to-end CPU smoke test.
-- `requirements-h100.txt`, `setup_h100.sh` — env + one-shot VM bring-up.
-- `origin` = your fork, `upstream` = kundajelab.
+- `setup_h100.sh`, `call_peaks.sh` — one-command VM bring-up (uv) + peak calling.
+- `origin` = your fork, `upstream` = kundajelab. (Legacy `setup.py`/`requirements*.txt` removed on `uv-migration`.)
 
 ### Local project: `/Users/javkhlan-ochirganbat/agent_outputs/ATACModel`
 - `verify_fragments.py` — Gate 0 checker (has the known blind spot; see §3.3).
 - `smoke_test_model.py`, `smoke_test_multitask.py`, `smoke_test_pipeline.py` — CPU smoke tests.
-- `requirements-h100.txt`, `setup_h100.sh` — copies (also in fork).
+- Env is defined canonically by the fork's `pyproject.toml`/`uv.lock` (`uv-migration` branch).
 - `data/` — `hg38.genome.fa` (2.9 GB), `hg38.chrom.sizes`, `bias_models.zip`, `folds.zip`, gate0 sweep artifacts. (These are re-downloaded on the VM by `setup_h100.sh`; the local copies are for reference.)
 
 ### Data — GCS: `gs://cfdx-experiments/dna_fm/experiments/jg_experiments/scatac_corpus/`
@@ -108,30 +111,35 @@ only for peak calling (fast) + the two training runs.
 
 ## 5. How to run on the H100
 
+It's a **uv project** (`pyproject.toml` + `uv.lock`). `setup_h100.sh` runs `uv sync`,
+so there's no manual venv — run everything with `uv run` from `$HOME/atac/chrombpnet`.
+
 ```bash
 # 0. SSH to the VM, then:
-git clone -b nucleosome-head https://github.com/Javkhaa/chrombpnet.git
+git clone -b uv-migration https://github.com/Javkhaa/chrombpnet.git
 cd chrombpnet
-bash setup_h100.sh                 # env (TF2.15+cuda), GPU assert, pull data, build dyad track
-source "$HOME/atac/.venv/bin/activate"
+bash setup_h100.sh                 # uv sync (TF2.15+cuda), GPU assert, pull data, build dyad track
 ```
-`setup_h100.sh` (edit `CELL_LINE=GM12878|K562|MCF7` at top): builds py3.11 env, **fails fast if no GPU**, pulls genome/bias/folds, pulls Pierce2021 fragments from your bucket, concatenates batches into one pseudobulk fragment file, builds the nucleosome dyad bigwig.
+`setup_h100.sh` (edit `CELL_LINE=GM12878|K562|MCF7` at top): installs uv + the env via
+`uv sync --extra peaks`, **fails fast if no GPU**, pulls genome/bias/folds, pulls
+Pierce2021 fragments from your bucket, concatenates batches into one pseudobulk
+fragment file, builds the nucleosome dyad bigwig. Run the rest from `$HOME/atac/chrombpnet`:
 
 ```bash
 # 1. PEAKS + NONPEAKS (CPU, minutes) — one command:
-bash call_peaks.sh $HOME/atac/data/GM12878.fragments.tsv.gz $HOME/atac/peaks
+uv run bash call_peaks.sh $HOME/atac/data/GM12878.fragments.tsv.gz $HOME/atac/peaks
 #    -> peaks.narrowPeak + nonpeaks.narrowPeak (MACS2 + chrombpnet GC-matched nonpeaks)
 
 # 2. HEAD-1 BASELINE (stock chrombpnet) — also writes the +4/-4 cut-site bigwig
-chrombpnet pipeline -ifrag $HOME/atac/data/GM12878.fragments.tsv.gz -d ATAC \
+uv run chrombpnet pipeline -ifrag $HOME/atac/data/GM12878.fragments.tsv.gz -d ATAC \
   -g $HOME/atac/data/hg38.fa -c $HOME/atac/data/hg38.chrom.sizes \
-  -p peaks.narrowPeak -n nonpeaks.narrowPeak \
+  -p $HOME/atac/peaks/peaks.narrowPeak -n $HOME/atac/peaks/nonpeaks.narrowPeak \
   -fl $HOME/atac/data/folds/fold_0.json -b $HOME/atac/data/bias_models/<ATAC_bias>.h5 \
   -o $HOME/atac/run_head1
 
 # 3. MULTI-TASK (head-1 + head-2) — reuses the cut-site bigwig + our dyad track
-python -m chrombpnet.multitask.train_multitask \
-  -p peaks.narrowPeak -n nonpeaks.narrowPeak -g $HOME/atac/data/hg38.fa \
+uv run chrombpnet-train-multitask \
+  -p $HOME/atac/peaks/peaks.narrowPeak -n $HOME/atac/peaks/nonpeaks.narrowPeak -g $HOME/atac/data/hg38.fa \
   --acc-bw $HOME/atac/run_head1/.../<cutsite>.bw \
   --nuc-bw $HOME/atac/data/GM12878.nucleosome_dyad.bw \
   -fl $HOME/atac/data/folds/fold_0.json -o $HOME/atac/run_multitask
