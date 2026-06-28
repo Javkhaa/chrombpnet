@@ -118,9 +118,9 @@ source "$HOME/atac/.venv/bin/activate"
 `setup_h100.sh` (edit `CELL_LINE=GM12878|K562|MCF7` at top): builds py3.11 env, **fails fast if no GPU**, pulls genome/bias/folds, pulls Pierce2021 fragments from your bucket, concatenates batches into one pseudobulk fragment file, builds the nucleosome dyad bigwig.
 
 ```bash
-# 1. PEAKS + NONPEAKS (the one remaining manual step; CPU, minutes)
-#    MACS2 on the pseudobulk fragments -> peaks.narrowPeak, then chrombpnet nonpeaks.
-#    (A call_peaks.sh helper can be added — see §7.)
+# 1. PEAKS + NONPEAKS (CPU, minutes) — one command:
+bash call_peaks.sh $HOME/atac/data/GM12878.fragments.tsv.gz $HOME/atac/peaks
+#    -> peaks.narrowPeak + nonpeaks.narrowPeak (MACS2 + chrombpnet GC-matched nonpeaks)
 
 # 2. HEAD-1 BASELINE (stock chrombpnet) — also writes the +4/-4 cut-site bigwig
 chrombpnet pipeline -ifrag $HOME/atac/data/GM12878.fragments.tsv.gz -d ATAC \
@@ -148,7 +148,7 @@ Hold out a chromosome (the fold JSON already defines train/valid/test). Default 
 ---
 
 ## 7. Open items / next actions
-- [ ] **`call_peaks.sh`** helper in the fork (MACS2 + `chrombpnet prep nonpeaks`) so step 1 is one command.
+- [x] **`call_peaks.sh`** helper in the fork (MACS2 + `chrombpnet prep nonpeaks`) — done; verify flag names against your chrombpnet version.
 - [ ] Run head-1 baseline, confirm GPU + `bw_shift_qc.png` looks right.
 - [ ] Run multi-task; tune `--nucleosome-profile-weight` (start 1.0).
 - [ ] **Head-1 bias correction in the multi-task model**: currently bias-free. To match stock chrombpnet, graft the frozen bias model onto the accessibility head only (Add in logit space, logsumexp on counts — same pattern as `chrombpnet_with_bias_model.py`). Head 2 stays bias-free (dyads carry no Tn5 cut-site bias). Decide whether baseline-quality head-1 needs it before investing.
