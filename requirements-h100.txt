@@ -1,0 +1,35 @@
+# chrombpnet on H100 (Hopper, sm_90) — env spec resolved off-GPU.
+#
+# Rationale:
+#  - Stock chrombpnet pins tensorflow==2.8.0, which has NO sm_90 kernels -> will
+#    not accelerate on an H100. We bump to TF 2.15 (last release with Keras 2 as
+#    the default, so chrombpnet's tf.keras code ports with ~zero changes).
+#  - Install with the [and-cuda] extra: TF bundles its own CUDA 12 runtime libs
+#    as pip deps, so a CUDA 13 *driver* (backward compatible) runs them fine.
+#    The host CUDA toolkit version is irrelevant with this install path.
+#  - Interpretation deps (deeplift/modisco/shap) are NOT needed to train and are
+#    deferred to a separate optional file to avoid resolver conflicts.
+#
+# Install on the VM:
+#   python3.11 -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements-h100.txt
+# Verify GPU is seen:
+#   python -c "import tensorflow as tf; print(tf.__version__, tf.config.list_physical_devices('GPU'))"
+
+tensorflow[and-cuda]==2.15.*
+tensorflow-probability==0.23.0
+numpy>=1.24,<2.0
+pandas>=1.3.4
+scipy>=1.10
+scikit-learn>=1.1.2
+h5py>=3.1
+pyfaidx==0.6.1
+pyBigWig>=0.3.18
+matplotlib>=3.5
+tqdm>=4.48
+protobuf>=3.20,<5
+
+# --- optional, interpretation only (install separately if/when needed) ---
+# deeplift==0.6.13.0
+# modisco-lite==2.0.7
+# kundajelab-shap==1
