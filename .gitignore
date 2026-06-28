@@ -1,5 +1,7 @@
 # Compiler outputs #
 # Directories #
+data
+data/
 # logs
 *.a
 *.bat
@@ -16,4 +18,5 @@ experimental_scripts
 needs_cleanup
 old
 results
+runs/
 tracks

@@ -8,22 +8,16 @@ version = "1.0.1"
 description = "ChromBPNet predicts chromatin accessibility from sequence (multi-task nucleosome fork)"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9,<3.12"   # TensorFlow 2.15 supports CPython 3.9-3.11
+requires-python = ">=3.11,<3.12"
 authors = [{ name = "Kundaje Lab" }, { name = "Javkhaa (nucleosome fork)" }]
 keywords = ["scATAC", "chromatin", "deep-learning", "nucleosome", "genomics"]
 
-# Core runtime + training deps. TensorFlow is platform-marked:
-#   linux  -> tensorflow[and-cuda] (bundles CUDA 12 libs; runs on H100 under the
-#             host CUDA 13 driver, which is backward compatible)
-#   darwin -> plain tensorflow (CPU) for local development / smoke tests
-# TF 2.15 is the last release with Keras 2 as default, so the existing tf.keras
-# code ports unchanged (the upstream pin of tensorflow==2.8 has no Hopper kernels).
+# Core runtime for preprocessing, label building, and PyTorch training utilities.
+# The owned multi-task path is PyTorch via the cpu/gpu extras below.
 dependencies = [
-  "tensorflow[and-cuda]==2.15.* ; sys_platform == 'linux'",
-  "tensorflow==2.15.* ; sys_platform != 'linux'",
-  "tensorflow-probability==0.23.0",
   "numpy>=1.24,<2",
   "pandas>=1.3",
+  "polars>=1.0",
   "scipy>=1.10",
   "h5py>=3.1",
   "pyfaidx>=0.6",
@@ -34,12 +28,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Peak calling for the preprocessing/baseline step (call_peaks.sh).
-peaks = ["macs2>=2.2.9"]
-# Model interpretation (DeepLIFT/TF-MoDISco/SHAP) — not needed for training.
-interpret = ["deeplift==0.6.13.0", "modisco-lite==2.0.7", "kundajelab-shap==1", "deepdish==0.3.7"]
-# HTML/PDF QC reports.
-report = ["weasyprint", "matplotlib-venn"]
+# PyTorch training stack, matching Prima's CPU/GPU-extra convention.
+# Direct wheel URLs keep this repo on Prima's tested CUDA 12.8 nightly line even
+# when the public nightly simple index stops advertising older builds.
+cpu = [
+  "torch @ https://download-r2.pytorch.org/whl/nightly/cpu/torch-2.12.0.dev20260407%2Bcpu-cp311-cp311-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "torch @ https://download-r2.pytorch.org/whl/nightly/cpu/torch-2.12.0.dev20260407%2Bcpu-cp311-cp311-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+gpu = [
+  "torch @ https://download-r2.pytorch.org/whl/nightly/cu128/torch-2.12.0.dev20260407%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "torch @ https://download-r2.pytorch.org/whl/nightly/cu128/torch-2.12.0.dev20260407%2Bcu128-cp311-cp311-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "pytorch-triton @ https://download-r2.pytorch.org/whl/nightly/pytorch_triton-3.6.0%2Bgit5261b273-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "pytorch-triton @ https://download-r2.pytorch.org/whl/nightly/pytorch_triton-3.6.0%2Bgit5261b273-cp311-cp311-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "triton @ https://download-r2.pytorch.org/whl/nightly/triton-3.7.0%2Bgit9c288bc5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "triton @ https://download-r2.pytorch.org/whl/nightly/triton-3.7.0%2Bgit9c288bc5-cp311-cp311-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+# Peak calling for the preprocessing step (call_peaks.sh).
+peaks = ["macs3>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/Javkhaa/chrombpnet"
@@ -47,20 +52,23 @@ Upstream = "https://github.com/kundajelab/chrombpnet"
 
 [project.scripts]
 chrombpnet = "chrombpnet.CHROMBPNET:main"
-print_meme_motif_file = "chrombpnet.data:print_meme_motif_file"
 # multi-task additions
 chrombpnet-build-tracks = "chrombpnet.multitask.build_label_tracks:main"
-chrombpnet-train-multitask = "chrombpnet.multitask.train_multitask:main"
+chrombpnet-train-multitask = "chrombpnet.multitask.train_multitask_torch:main"
 
 [tool.setuptools.packages.find]
 include = ["chrombpnet*"]
 
-[tool.setuptools.package-data]
-# Tn5/DNase reference motifs (used by auto_shift_detect) + MEME databases.
-chrombpnet = ["data/*"]
-
 # Note: external (non-pip) tools still required on PATH for preprocessing:
-#   samtools, bedtools, ucsc-bedGraphToBigWig, meme  (install via conda/system).
-#   On the H100, setup_h100.sh handles the Python env via uv; install those
-#   system tools separately (e.g. `conda install -c bioconda samtools bedtools
-#   ucsc-bedgraphtobigwig meme`).
+#   samtools and bedtools for peak/nonpeak preparation.
+#   On the H100, setup_h100.sh handles the Python env via uv.
+
+[tool.uv]
+prerelease = "allow"
+index-strategy = "unsafe-best-match"
+conflicts = [
+  [
+    { package = "chrombpnet", extra = "cpu" },
+    { package = "chrombpnet", extra = "gpu" },
+  ],
+]

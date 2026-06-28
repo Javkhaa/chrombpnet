@@ -28,18 +28,18 @@ Scoped to train on a single H100 in hours–days. See
 | Gate 1 (hg38 + chr naming) | ✅ confirmed |
 | Primary dataset chosen | ✅ **Pierce2021** (GM12878 primary, K562 secondary) |
 | Corpus-wide Gate 0 sweep (26 datasets) | ✅ 23/26 viable |
-| H100 env (TF version) resolved + CPU-proven | ✅ TF 2.15 |
+| H100 env / training stack | ✅ PyTorch GPU extra installed |
 | Two-head model implemented + smoke-tested | ✅ |
 | Dyad label builder + dual-target loader + trainer | ✅ committed & pushed |
 | End-to-end CPU pipeline smoke test | ✅ passes |
-| **Peaks + nonpeaks for Pierce2021** | ⬜ TODO (needs MACS2 on pseudobulk; H100 or CPU) |
-| **Head-1 baseline run** | ⬜ TODO (first H100 run; generates cut-site bigwig) |
-| **Multi-task training run** | ⬜ TODO (after baseline) |
+| **Peaks + nonpeaks for Pierce2021** | ⬜ TODO (needs MACS3 + chrombpnet nonpeaks; H100 or CPU) |
+| **Head-1 accessibility cut-site track** | ✅ built for GM12878/K562/MCF7 |
+| **Multi-task training run** | ✅ 2-epoch GM12878 pilot complete; full run next |
 | ENCODE MNase/DNase + TSS validation assets | ⬜ TODO (for validation phase) |
 | Head-1 bias-model integration into multi-task | ⬜ deferred (see §7) |
 
 **Bottom line:** everything off-GPU is done and validated. The H100 is needed
-only for peak calling (fast) + the two training runs.
+only for peak calling (fast) + full training runs.
 
 ---
 
@@ -65,14 +65,13 @@ only for peak calling (fast) + the two training runs.
 
 ### 3.4 Corpus standardization & the Tn5 shift — resolved
 - The Tsinghua corpus **does not shift coordinates** — "standardization" is metadata/format only; fragment coordinates are inherited raw from each source pipeline.
-- **No manual shift needed.** chrombpnet's `reads_to_bigwig.py` runs `auto_shift_detect`: it estimates the existing shift by matching the insertion-site PWM to the Tn5 reference motif (needs `-g hg38.fa`), then applies only the delta to reach the canonical +4/−4. Just feed `-ifrag` + `-g`, do **not** hardcode `-ps/-ms`, and check `bw_shift_qc.png`.
-- Head 2 (dyad = fragment center) is shift-insensitive anyway (±4 bp on both ends barely moves a center).
+- Head 1 uses `chrombpnet-build-tracks --mode cutsite --plus-shift 4 --minus-shift -4` to build the accessibility cut-site bigwig directly from fragments.
+- Head 2 uses fragment centers from mono-nucleosomal fragments; dyad labels are effectively insensitive to the small Tn5 end shift.
 
-### 3.5 Environment: TF 2.15 (not the pinned 2.8)
-- Stock chrombpnet pins `tensorflow==2.8.0`, which has **no Hopper (sm_90) kernels** → would not accelerate on H100.
-- Fix: **TF 2.15** (last release with Keras-2 default → chrombpnet code ports with zero changes; verified). Install with `tensorflow[and-cuda]==2.15.*` — it **bundles CUDA 12 libs**, which run fine under the host's **CUDA 13 driver** (backward compatible). System CUDA toolkit version is irrelevant with this install path.
-- tfp 0.23.0, numpy<2. Interpretation deps (deeplift/modisco/shap) deferred — not needed to train.
-- The repo was **migrated from `setup.py` to a uv project** (`pyproject.toml` + `uv.lock`, branch `uv-migration`). Deps are platform-marked (CUDA on linux, CPU on mac) so `uv sync` works on both; `uv lock` resolves 190 pkgs universally; `uv run` validated (imports, console scripts, package data all OK).
+### 3.5 Environment: PyTorch-first
+- Prima's internal ML stack is PyTorch + `uv` + Python 3.11. The owned multi-task nucleosome path now follows that convention.
+- `chrombpnet-train-multitask` points to the PyTorch trainer; legacy training/evaluation code has been pruned from this fork.
+- The repo is a `uv` project (`pyproject.toml` + `uv.lock`). Use `uv sync --extra gpu --extra peaks` for PyTorch GPU training + MACS3 peak calling.
 
 ### 3.6 Note on Camiel2023 (if ever used)
 = Mannens et al. 2024 *Nature* (human fetal brain, 10x, ~27.6k frags/cell → 300 GB). Corpus lists ~679k cells (pre-QC) vs paper's 526,094 — apply QC, don't assume the published set.
@@ -82,21 +81,21 @@ only for peak calling (fast) + the two training runs.
 ## 4. Where everything lives
 
 ### Code — fork: https://github.com/Javkhaa/chrombpnet
-Branches: `nucleosome-head` (feature code) and **`uv-migration`** (feature code + uv build; use this one on the VM).
-- `pyproject.toml` + `uv.lock` — **uv project**. TF is platform-marked: `tensorflow[and-cuda]` on linux (H100), plain `tensorflow` on mac (dev). Optional extras: `peaks` (macs2), `interpret`, `report`.
-- `chrombpnet/training/models/multitask_nucleosome_model.py` — shared trunk + 2 heads.
+Branch: `nucleosome-head` (feature code + uv build).
+- `pyproject.toml` + `uv.lock` — **uv project**. Optional extras: `gpu`/`cpu` (PyTorch), `peaks` (MACS3).
+- `chrombpnet/training/models/multitask_nucleosome_torch.py` — PyTorch shared trunk + 2 heads.
 - `chrombpnet/multitask/build_label_tracks.py` — build dyad (head-2) / cut-site bigwigs (entry point `chrombpnet-build-tracks`).
-- `chrombpnet/multitask/data_generator.py` — `MultiTaskBatchGenerator` (two bigwigs, shared crop+revcomp).
-- `chrombpnet/multitask/train_multitask.py` — training entry (`chrombpnet-train-multitask`).
-- `tests/smoke_test_pipeline.py` — end-to-end CPU smoke test.
+- `chrombpnet/multitask/torch_data.py` — PyTorch dataset (two bigwigs, shared crop+revcomp).
+- `chrombpnet/multitask/train_multitask_torch.py` — PyTorch training entry (`chrombpnet-train-multitask`).
+- `tests/smoke_test_pipeline_torch.py` and `tests/smoke_test_multitask_torch.py` — PyTorch smoke tests.
 - `setup_h100.sh`, `call_peaks.sh` — one-command VM bring-up (uv) + peak calling.
-- `origin` = your fork, `upstream` = kundajelab. (Legacy `setup.py`/`requirements*.txt` removed on `uv-migration`.)
+- `origin` = your fork, `upstream` = kundajelab.
 
 ### Local project: `/Users/javkhlan-ochirganbat/agent_outputs/ATACModel`
 - `verify_fragments.py` — Gate 0 checker (has the known blind spot; see §3.3).
 - `smoke_test_model.py`, `smoke_test_multitask.py`, `smoke_test_pipeline.py` — CPU smoke tests.
-- Env is defined canonically by the fork's `pyproject.toml`/`uv.lock` (`uv-migration` branch).
-- `data/` — `hg38.genome.fa` (2.9 GB), `hg38.chrom.sizes`, `bias_models.zip`, `folds.zip`, gate0 sweep artifacts. (These are re-downloaded on the VM by `setup_h100.sh`; the local copies are for reference.)
+- Env is defined canonically by the fork's `pyproject.toml`/`uv.lock`.
+- `data/` — `hg38.genome.fa` (2.9 GB), `hg38.chrom.sizes`, `folds.zip`, gate0 sweep artifacts. (These are re-downloaded on the VM by `setup_h100.sh`; the local copies are for reference.)
 
 ### Data — GCS: `gs://cfdx-experiments/dna_fm/experiments/jg_experiments/scatac_corpus/`
 - Full corpus, one `{Dataset}/{Dataset}-{tissue}/fragments_standardized.tar.gz` each.
@@ -105,7 +104,7 @@ Branches: `nucleosome-head` (feature code) and **`uv-migration`** (feature code 
 
 ### Hosted reference (chrombpnet)
 - genome/chrom.sizes: `https://storage.googleapis.com/chrombpnet_data/input_files/{hg38.genome.fa,hg38.chrom.sizes}`
-- bias models + folds: `https://zenodo.org/records/7443683/files/{bias_models.zip,folds.zip}`
+- folds: `https://zenodo.org/records/7443683/files/folds.zip`
 
 ---
 
@@ -116,9 +115,9 @@ so there's no manual venv — run everything with `uv run` from `$HOME/atac/chro
 
 ```bash
 # 0. SSH to the VM, then:
-git clone -b uv-migration https://github.com/Javkhaa/chrombpnet.git
+git clone -b nucleosome-head https://github.com/Javkhaa/chrombpnet.git
 cd chrombpnet
-bash setup_h100.sh                 # uv sync (TF2.15+cuda), GPU assert, pull data, build dyad track
+bash setup_h100.sh                 # uv sync, GPU assert, pull data, build label tracks
 ```
 `setup_h100.sh` (edit `CELL_LINE=GM12878|K562|MCF7` at top): installs uv + the env via
 `uv sync --extra peaks`, **fails fast if no GPU**, pulls genome/bias/folds, pulls
@@ -128,23 +127,20 @@ fragment file, builds the nucleosome dyad bigwig. Run the rest from `$HOME/atac/
 ```bash
 # 1. PEAKS + NONPEAKS (CPU, minutes) — one command:
 uv run bash call_peaks.sh $HOME/atac/data/GM12878.fragments.tsv.gz $HOME/atac/peaks
-#    -> peaks.narrowPeak + nonpeaks.narrowPeak (MACS2 + chrombpnet GC-matched nonpeaks)
+#    -> peaks.narrowPeak + nonpeaks.narrowPeak (MACS3 + chrombpnet GC-matched nonpeaks)
 
-# 2. HEAD-1 BASELINE (stock chrombpnet) — also writes the +4/-4 cut-site bigwig
-uv run chrombpnet pipeline -ifrag $HOME/atac/data/GM12878.fragments.tsv.gz -d ATAC \
-  -g $HOME/atac/data/hg38.fa -c $HOME/atac/data/hg38.chrom.sizes \
-  -p $HOME/atac/peaks/peaks.narrowPeak -n $HOME/atac/peaks/nonpeaks.narrowPeak \
-  -fl $HOME/atac/data/folds/fold_0.json -b $HOME/atac/data/bias_models/<ATAC_bias>.h5 \
-  -o $HOME/atac/run_head1
+# 2. ACCESSIBILITY BIGWIG
+# setup_h100.sh builds the accessibility cut-site bigwig used as --acc-bw.
 
-# 3. MULTI-TASK (head-1 + head-2) — reuses the cut-site bigwig + our dyad track
+# 3. MULTI-TASK PYTORCH (head-1 + head-2) — reuses the cut-site bigwig + our dyad track
 uv run chrombpnet-train-multitask \
   -p $HOME/atac/peaks/peaks.narrowPeak -n $HOME/atac/peaks/nonpeaks.narrowPeak -g $HOME/atac/data/hg38.fa \
   --acc-bw $HOME/atac/run_head1/.../<cutsite>.bw \
   --nuc-bw $HOME/atac/data/GM12878.nucleosome_dyad.bw \
-  -fl $HOME/atac/data/folds/fold_0.json -o $HOME/atac/run_multitask
+  -fl $HOME/atac/data/folds/fold_0.json -o $HOME/atac/run_multitask \
+  --num-workers 16
 ```
-Hold out a chromosome (the fold JSON already defines train/valid/test). Default model: filters 512, 8 dilated layers, inputlen 2114, outputlen 1000.
+Hold out a chromosome (the fold JSON already defines train/valid/test). Default model: filters 512, 8 dilated layers, inputlen 2114, outputlen 1000, num-workers 16.
 
 ---
 
@@ -156,10 +152,10 @@ Hold out a chromosome (the fold JSON already defines train/valid/test). Default 
 ---
 
 ## 7. Open items / next actions
-- [x] **`call_peaks.sh`** helper in the fork (MACS2 + `chrombpnet prep nonpeaks`) — done; verify flag names against your chrombpnet version.
-- [ ] Run head-1 baseline, confirm GPU + `bw_shift_qc.png` looks right.
+- [x] **`call_peaks.sh`** helper in the fork (MACS3 + `chrombpnet prep nonpeaks`) — done; verify flag names against your chrombpnet version.
+- [x] Build head-1 accessibility cut-site bigwigs for GM12878/K562/MCF7.
 - [ ] Run multi-task; tune `--nucleosome-profile-weight` (start 1.0).
-- [ ] **Head-1 bias correction in the multi-task model**: currently bias-free. To match stock chrombpnet, graft the frozen bias model onto the accessibility head only (Add in logit space, logsumexp on counts — same pattern as `chrombpnet_with_bias_model.py`). Head 2 stays bias-free (dyads carry no Tn5 cut-site bias). Decide whether baseline-quality head-1 needs it before investing.
+- [ ] **Head-1 bias correction in the multi-task model**: currently bias-free. If baseline-quality head-1 becomes important, add a PyTorch bias branch to the accessibility head only. Head 2 stays bias-free because dyads carry no Tn5 cut-site bias.
 - [ ] Download ENCODE MNase/DNase (GM12878, K562) + GENCODE TSS for validation.
 - [ ] Backport the hardened Gate-0 check into `verify_fragments.py`.
 - [ ] If pretraining head-2 corpus-wide later: exclude Buenrostro2018, Li2023a, Liscovitch-Brauer2021.
@@ -170,8 +166,8 @@ Hold out a chromosome (the fold JSON already defines train/valid/test). Default 
 - **Don't double-shift.** Let chrombpnet auto-detect (don't pass `-ps/-ms`); always pass `-g hg38.fa` so detection works.
 - **K562 pseudobulk:** Pierce2021 batches only; drop Liscovitch-Brauer.
 - **Chromosome filter:** corpus fragments include unplaced scaffolds (GL/KI) + chrM; restrict to chr1–22,X,Y (folds JSON does this; `build_label_tracks.py` defaults to main chroms).
-- **Memory:** `build_label_tracks.py` allocates ~12 GB for the whole genome (fine on the VM).
-- **Keras version:** stay on TF 2.15 (Keras 2). TF ≥2.16 defaults to Keras 3 and breaks the `tf.keras` code unless `TF_USE_LEGACY_KERAS=1` + `tf-keras`.
+- **Memory:** `build_label_tracks.py` now uses Polars sparse aggregation by default; smoothed dyad tracks still materialize dense chromosome arrays.
+- **PyTorch-only for owned work:** training now goes through `chrombpnet-train-multitask`; legacy training/evaluation code was removed to keep the fork focused.
 
 ---
 
