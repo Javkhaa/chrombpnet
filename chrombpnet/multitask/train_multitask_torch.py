@@ -100,6 +100,12 @@ def main():
     ap.add_argument('--num-workers', type=int, default=16)
     ap.add_argument('--prefetch-factor', type=int, default=2)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    # Experiment tracking (Weights & Biases). Off by default so smoke tests and
+    # offline runs need no wandb install or credentials.
+    ap.add_argument('--wandb', action='store_true', help='Log metrics to Weights & Biases')
+    ap.add_argument('--wandb-entity', default='prima-mente')
+    ap.add_argument('--wandb-project', default='jg_experiments')
+    ap.add_argument('--wandb-run-name', default=None, help='Optional run name (defaults to wandb auto-name)')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -117,28 +123,57 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
     best = float('inf')
+    best_epoch = 0
     stale = 0
     out = Path(args.output_prefix)
     out.parent.mkdir(parents=True, exist_ok=True)
     log_path = out.with_suffix('.log')
-    with open(log_path, 'w') as log:
-        log.write('epoch,train_loss,val_loss\n')
-        for epoch in range(1, args.epochs + 1):
-            train_ds.on_epoch_end()
-            train_loss = run_epoch(model, train_loader, optimizer, device, args)
-            val_loss = run_epoch(model, valid_loader, None, device, args)
-            print(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
-            log.write(f"{epoch},{train_loss:.8f},{val_loss:.8f}\n"); log.flush()
-            if val_loss < best:
-                best = val_loss
-                stale = 0
-                torch.save({'model_state_dict': model.state_dict(), 'args': vars(args), 'val_loss': best},
-                           str(out) + '.pt')
-            else:
-                stale += 1
-                if stale >= args.early_stop_patience:
+
+    wandb_run = None
+    if args.wandb:
+        import wandb
+        wandb_run = wandb.init(
+            entity=args.wandb_entity,
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args),
+        )
+
+    try:
+        with open(log_path, 'w') as log:
+            log.write('epoch,train_loss,val_loss\n')
+            for epoch in range(1, args.epochs + 1):
+                train_ds.on_epoch_end()
+                train_loss = run_epoch(model, train_loader, optimizer, device, args)
+                val_loss = run_epoch(model, valid_loader, None, device, args)
+                print(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+                log.write(f"{epoch},{train_loss:.8f},{val_loss:.8f}\n"); log.flush()
+                is_best = val_loss < best
+                if is_best:
+                    best = val_loss
+                    best_epoch = epoch
+                    stale = 0
+                    torch.save({'model_state_dict': model.state_dict(), 'args': vars(args), 'val_loss': best},
+                               str(out) + '.pt')
+                else:
+                    stale += 1
+                if wandb_run is not None:
+                    wandb_run.log({
+                        'epoch': epoch,
+                        'train/loss': train_loss,
+                        'val/loss': val_loss,
+                        'val/best_loss': best,
+                        'val/best_epoch': best_epoch,
+                    }, step=epoch)
+                if not is_best and stale >= args.early_stop_patience:
                     break
-    print('saved', str(out) + '.pt')
+        print('saved', str(out) + '.pt')
+        if wandb_run is not None:
+            wandb_run.summary['best_val_loss'] = best
+            wandb_run.summary['best_epoch'] = best_epoch
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == '__main__':
