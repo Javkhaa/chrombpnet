@@ -64,6 +64,66 @@ class MultiTaskNucleosomeModel(nn.Module):
         return acc_profile, acc_count, nuc_profile, nuc_count
 
 
+class MultiCellMultiTaskModel(nn.Module):
+    """Shared dilated-conv trunk with one (accessibility, nucleosome) head pair
+    per cell type. The trunk is cell-type-agnostic so it can later be reused with
+    a conditioning embedding for zero-shot transfer to unseen cell types.
+
+    forward(seq, ct_idx) returns per-sample outputs aligned to the batch, so the
+    existing ``multitask_loss`` applies unchanged.
+    """
+
+    def __init__(self, n_cell_types: int, inputlen: int = 2114, outputlen: int = 1000,
+                 filters: int = 512, n_dil_layers: int = 8):
+        super().__init__()
+        self.inputlen = inputlen
+        self.outputlen = outputlen
+        self.n_cell_types = n_cell_types
+        self.first = nn.Conv1d(4, filters, kernel_size=21, padding=0)
+        self.dilated = nn.ModuleList([
+            nn.Conv1d(filters, filters, kernel_size=3, dilation=2 ** i, padding=0)
+            for i in range(1, n_dil_layers + 1)
+        ])
+        self.accessibility = nn.ModuleList([ProfileCountHead(filters, outputlen) for _ in range(n_cell_types)])
+        self.nucleosome = nn.ModuleList([ProfileCountHead(filters, outputlen) for _ in range(n_cell_types)])
+
+    @staticmethod
+    def _center_crop(x: torch.Tensor, width: int) -> torch.Tensor:
+        diff = x.shape[-1] - width
+        if diff < 0 or diff % 2 != 0:
+            raise ValueError(f"Cannot center-crop length {x.shape[-1]} to {width}")
+        crop = diff // 2
+        return x[..., crop:-crop] if crop else x
+
+    def trunk(self, seq: torch.Tensor) -> torch.Tensor:
+        if seq.shape[1] != 4:
+            seq = seq.transpose(1, 2)
+        x = F.relu(self.first(seq))
+        for conv in self.dilated:
+            conv_x = F.relu(conv(x))
+            x = conv_x + self._center_crop(x, conv_x.shape[-1])
+        return x
+
+    def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
+        x = self.trunk(seq)                                  # (B, filters, L')
+        B = x.shape[0]
+        acc_profile = x.new_zeros((B, self.outputlen))
+        acc_count = x.new_zeros((B, 1))
+        nuc_profile = x.new_zeros((B, self.outputlen))
+        nuc_count = x.new_zeros((B, 1))
+        # Route each cell type's rows to its own head pair (one trunk pass total).
+        for ct in torch.unique(ct_idx):
+            m = ct_idx == ct
+            xc = x[m]
+            ap, ac = self.accessibility[int(ct)](xc)
+            npf, nc = self.nucleosome[int(ct)](xc)
+            acc_profile[m] = ap
+            acc_count[m] = ac
+            nuc_profile[m] = npf
+            nuc_count[m] = nc
+        return acc_profile, acc_count, nuc_profile, nuc_count
+
+
 def multinomial_nll(true_counts: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     """Mean multinomial negative log likelihood for profile-count targets."""
     true_counts = true_counts.float()
