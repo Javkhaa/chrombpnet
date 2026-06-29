@@ -73,7 +73,7 @@ if [ ! -f "$CELL_PEAKDIR/peaks.narrowPeak" ]; then
     bash "$HERE/call_peaks_sharded.sh" "$FRAGS" "$CELL_PEAKDIR"
 fi
 
-echo "== [$CELL] 4. append manifest row =="
+echo "== [$CELL] 4. emit manifest row =="
 # Paths relative to OUT_ROOT so the manifest is portable.
 ROW="$(printf '%s\t%s\t%s\t%s\t%s' \
   "$CELL" \
@@ -81,11 +81,20 @@ ROW="$(printf '%s\t%s\t%s\t%s\t%s' \
   "peaks/$CELL/nonpeaks.narrowPeak" \
   "data/${CELL}.accessibility_cutsite.bw" \
   "data/${CELL}.nucleosome_dyad.bw")"
-[ -f "$MANIFEST" ] || printf '# cell_type\tpeaks\tnonpeaks\tacc_bw\tnuc_bw\n' > "$MANIFEST"
-# replace any existing row for this cell type, then append
-grep -vP "^${CELL}\t" "$MANIFEST" > "$MANIFEST.tmp" 2>/dev/null || cp "$MANIFEST" "$MANIFEST.tmp"
-mv "$MANIFEST.tmp" "$MANIFEST"
-printf '%s\n' "$ROW" >> "$MANIFEST"
+# Race-free for parallel / Flyte runs: each cell type writes its OWN row file and
+# prints the row to stdout (capture as a Flyte task output). After all tasks finish,
+# aggregate once:   cat "$OUT_ROOT"/manifest.d/*.tsv > "$OUT_ROOT"/manifest.tsv
+mkdir -p "$OUT_ROOT/manifest.d"
+printf '%s\n' "$ROW" > "$OUT_ROOT/manifest.d/${CELL}.tsv"
+printf 'MANIFEST_ROW\t%s\n' "$ROW"
+# Convenience shared manifest for SEQUENTIAL/local use only (NOT parallel-safe).
+# Set EMIT_ROW_ONLY=1 in parallel/Flyte contexts to skip this.
+if [ "${EMIT_ROW_ONLY:-0}" != "1" ]; then
+  [ -f "$MANIFEST" ] || printf '# cell_type\tpeaks\tnonpeaks\tacc_bw\tnuc_bw\n' > "$MANIFEST"
+  grep -vP "^${CELL}\t" "$MANIFEST" > "$MANIFEST.tmp" 2>/dev/null || cp "$MANIFEST" "$MANIFEST.tmp"
+  mv "$MANIFEST.tmp" "$MANIFEST"
+  printf '%s\n' "$ROW" >> "$MANIFEST"
+fi
 
 cat <<EOF
 
