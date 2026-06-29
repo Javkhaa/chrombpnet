@@ -56,6 +56,7 @@ chrombpnet = "chrombpnet.CHROMBPNET:main"
 # multi-task additions
 chrombpnet-build-tracks = "chrombpnet.multitask.build_label_tracks:main"
 chrombpnet-train-multitask = "chrombpnet.multitask.train_multitask_torch:main"
+chrombpnet-eval-multitask = "chrombpnet.multitask.evaluate_multitask:main"
 
 [tool.setuptools.packages.find]
 include = ["chrombpnet*"]
