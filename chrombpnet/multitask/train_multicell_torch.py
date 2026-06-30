@@ -281,18 +281,24 @@ def main():
                           'time/train_samples_per_sec': tr['n'] / max(t1 - t0, 1e-9)}
                     for k in COMPONENT_KEYS:
                         ld[f'train/{k}'] = tr[k]; ld[f'val/{k}'] = va[k]
+                    figs = None
                     if args.eval_every and (epoch % args.eval_every == 0 or epoch == args.epochs):
-                        ld.update(M.heldout_metrics(model, valid_cat, ev_idx, ev_is_peak,
-                                                    device, args.outputlen, multicell=True, prefix='val'))
+                        try:
+                            ld.update(M.heldout_metrics(model, valid_cat, ev_idx, ev_is_peak,
+                                                        device, args.outputlen, multicell=True, prefix='val'))
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[warn] held-out metrics failed at epoch {epoch}: {e}")
                         if args.log_examples:
-                            import wandb
-                            import matplotlib.pyplot as plt
-                            figs = M.example_profile_figures(model, valid_cat, ev_idx, device,
-                                                             args.outputlen, multicell=True, n=args.log_examples)
-                            ld['val/examples'] = [wandb.Image(f) for f in figs]
-                            for f in figs:
-                                plt.close(f)
-                    wandb_run.log(ld, step=epoch)
+                            try:
+                                figs = M.example_profile_figures(model, valid_cat, ev_idx, device,
+                                                                 args.outputlen, multicell=True, n=args.log_examples)
+                            except Exception as e:  # noqa: BLE001
+                                print(f"[warn] example plots failed at epoch {epoch}: {e}")
+                    M.log_epoch_to_wandb(wandb_run, ld, examples=figs)
+                    if figs:
+                        import matplotlib.pyplot as plt
+                        for f in figs:
+                            plt.close(f)
                 if not is_best and stale >= args.early_stop_patience:
                     break
         print('saved', str(out) + '.pt')

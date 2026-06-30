@@ -96,6 +96,30 @@ def heldout_metrics(model, dataset, indices, is_peak_sub, device, outputlen,
     return out
 
 
+def log_epoch_to_wandb(wandb_run, ld, examples=None):
+    """Robust per-epoch wandb log: a wandb backend hiccup must never stall or kill
+    training. Scalars are always attempted; example images are best-effort and
+    dropped on failure (their server-version check has been observed to time out).
+    """
+    import wandb
+    if examples:
+        try:
+            ld = {**ld, 'val/examples': [wandb.Image(f) for f in examples]}
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] building wandb images failed: {e}")
+    step = ld.get('epoch')
+    try:
+        wandb_run.log(ld, step=step)
+        return
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] wandb.log failed at epoch {step} ({e}); retrying without images")
+    ld.pop('val/examples', None)
+    try:
+        wandb_run.log(ld, step=step)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] wandb.log failed again at epoch {step}: {e}")
+
+
 @torch.no_grad()
 def example_profile_figures(model, dataset, indices, device, outputlen,
                             multicell=False, n=3):
