@@ -92,6 +92,10 @@ def main():
     ap.add_argument('--revcomp-check', type=int, default=512, help='regions for revcomp consistency (0=skip)')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('-o', '--out-json', default=None)
+    ap.add_argument('--wandb', action='store_true', help='log eval metrics to Weights & Biases')
+    ap.add_argument('--wandb-entity', default='prima-mente')
+    ap.add_argument('--wandb-project', default='jg_experiments')
+    ap.add_argument('--wandb-run-name', default=None)
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -229,6 +233,27 @@ def main():
         with open(args.out_json, 'w') as f:
             json.dump(results, f, indent=2)
         print("wrote", args.out_json)
+
+    if args.wandb:
+        import wandb
+        run = wandb.init(entity=args.wandb_entity, project=args.wandb_project,
+                         name=args.wandb_run_name or f"eval-{args.split}",
+                         config={'checkpoint': args.checkpoint, 'split': args.split,
+                                 'n_peaks': results['n_peaks'], 'n_nonpeaks': results['n_nonpeaks']})
+        flat = {}
+
+        def _add(prefix, d):
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    _add(f"{prefix}{k}/", v)
+                elif isinstance(v, (int, float)):
+                    flat[f"{prefix}{k}"] = v
+        _add("eval/", results)
+        run.log(flat)
+        for k, v in flat.items():
+            run.summary[k] = v
+        run.finish()
+        print("logged", len(flat), "metrics to wandb")
 
 
 if __name__ == '__main__':

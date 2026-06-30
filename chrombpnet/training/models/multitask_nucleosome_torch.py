@@ -136,12 +136,25 @@ def multinomial_nll(true_counts: torch.Tensor, logits: torch.Tensor) -> torch.Te
 
 
 def multitask_loss(outputs, targets, counts_loss_weight=1.0,
-                   nucleosome_profile_weight=1.0, nucleosome_counts_weight=1.0):
+                   nucleosome_profile_weight=1.0, nucleosome_counts_weight=1.0,
+                   return_components=False):
     acc_profile, acc_count, nuc_profile, nuc_count = outputs
     acc, acc_lc, nuc, nuc_lc = targets
-    return (
-        multinomial_nll(acc, acc_profile)
-        + counts_loss_weight * F.mse_loss(acc_count, acc_lc)
-        + nucleosome_profile_weight * multinomial_nll(nuc, nuc_profile)
-        + nucleosome_counts_weight * F.mse_loss(nuc_count, nuc_lc)
-    )
+    acc_profile_nll = multinomial_nll(acc, acc_profile)
+    acc_count_mse = F.mse_loss(acc_count, acc_lc)
+    nuc_profile_nll = multinomial_nll(nuc, nuc_profile)
+    nuc_count_mse = F.mse_loss(nuc_count, nuc_lc)
+    total = (acc_profile_nll
+             + counts_loss_weight * acc_count_mse
+             + nucleosome_profile_weight * nuc_profile_nll
+             + nucleosome_counts_weight * nuc_count_mse)
+    if return_components:
+        # raw (unweighted) per-head terms, detached for logging
+        comps = {
+            'acc_profile_nll': acc_profile_nll.detach(),
+            'acc_count_mse': acc_count_mse.detach(),
+            'nuc_profile_nll': nuc_profile_nll.detach(),
+            'nuc_count_mse': nuc_count_mse.detach(),
+        }
+        return total, comps
+    return total
