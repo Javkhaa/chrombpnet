@@ -102,6 +102,7 @@ def main():
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    torch.backends.cudnn.benchmark = True  # stable-ish shapes -> faster conv algos
     device = torch.device(args.device)
 
     fold = json.load(open(args.fold_json))
