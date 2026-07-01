@@ -74,18 +74,33 @@ class MultiCellMultiTaskModel(nn.Module):
     """
 
     def __init__(self, n_cell_types: int, inputlen: int = 2114, outputlen: int = 1000,
-                 filters: int = 512, n_dil_layers: int = 8):
+                 filters: int = 512, n_dil_layers: int = 8, profile_kernel_size: int = 75):
         super().__init__()
         self.inputlen = inputlen
         self.outputlen = outputlen
         self.n_cell_types = n_cell_types
+        self.filters = filters
+        self.pks = profile_kernel_size
         self.first = nn.Conv1d(4, filters, kernel_size=21, padding=0)
         self.dilated = nn.ModuleList([
             nn.Conv1d(filters, filters, kernel_size=3, dilation=2 ** i, padding=0)
             for i in range(1, n_dil_layers + 1)
         ])
-        self.accessibility = nn.ModuleList([ProfileCountHead(filters, outputlen) for _ in range(n_cell_types)])
-        self.nucleosome = nn.ModuleList([ProfileCountHead(filters, outputlen) for _ in range(n_cell_types)])
+        # Per-cell-type heads as STACKED parameters (equivalent to n_cell_types
+        # ProfileCountHead modules) so a batch spanning many cell types runs as one
+        # grouped conv + a gather -- no Python loop over unique cell types and no
+        # int(ct) GPU->CPU syncs (critical when n_cell_types is large).
+        self.acc_profile_w = nn.Parameter(torch.empty(n_cell_types, filters, profile_kernel_size))
+        self.nuc_profile_w = nn.Parameter(torch.empty(n_cell_types, filters, profile_kernel_size))
+        self.acc_profile_b = nn.Parameter(torch.zeros(n_cell_types))
+        self.nuc_profile_b = nn.Parameter(torch.zeros(n_cell_types))
+        self.acc_count_w = nn.Parameter(torch.empty(n_cell_types, filters))
+        self.nuc_count_w = nn.Parameter(torch.empty(n_cell_types, filters))
+        self.acc_count_b = nn.Parameter(torch.zeros(n_cell_types))
+        self.nuc_count_b = nn.Parameter(torch.zeros(n_cell_types))
+        import math
+        for w in (self.acc_profile_w, self.nuc_profile_w, self.acc_count_w, self.nuc_count_w):
+            nn.init.kaiming_uniform_(w, a=math.sqrt(5))
 
     @staticmethod
     def _center_crop(x: torch.Tensor, width: int) -> torch.Tensor:
@@ -106,21 +121,25 @@ class MultiCellMultiTaskModel(nn.Module):
 
     def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
         x = self.trunk(seq)                                  # (B, filters, L')
-        B = x.shape[0]
-        acc_profile = x.new_zeros((B, self.outputlen))
-        acc_count = x.new_zeros((B, 1))
-        nuc_profile = x.new_zeros((B, self.outputlen))
-        nuc_count = x.new_zeros((B, 1))
-        # Route each cell type's rows to its own head pair (one trunk pass total).
-        for ct in torch.unique(ct_idx):
-            m = ct_idx == ct
-            xc = x[m]
-            ap, ac = self.accessibility[int(ct)](xc)
-            npf, nc = self.nucleosome[int(ct)](xc)
-            acc_profile[m] = ap
-            acc_count[m] = ac
-            nuc_profile[m] = npf
-            nuc_count[m] = nc
+        B, Fdim, L = x.shape
+        xr = x.reshape(1, B * Fdim, L)                       # for per-sample grouped conv
+        pooled = x.mean(dim=-1)                              # (B, filters)
+
+        def _head(prof_w, prof_b, cnt_w, cnt_b):
+            # profile: each sample convolved with ITS cell type's filter via grouped conv
+            logits = F.conv1d(xr, prof_w[ct_idx], bias=prof_b[ct_idx], groups=B).reshape(B, -1)
+            diff = logits.shape[-1] - self.outputlen
+            if diff < 0 or diff % 2 != 0:
+                raise ValueError(f"Cannot center-crop profile length {logits.shape[-1]} to {self.outputlen}")
+            crop = diff // 2
+            if crop:
+                logits = logits[:, crop:-crop]
+            # count: per-sample linear on the pooled trunk features
+            logcount = (pooled * cnt_w[ct_idx]).sum(-1, keepdim=True) + cnt_b[ct_idx].unsqueeze(-1)
+            return logits, logcount
+
+        acc_profile, acc_count = _head(self.acc_profile_w, self.acc_profile_b, self.acc_count_w, self.acc_count_b)
+        nuc_profile, nuc_count = _head(self.nuc_profile_w, self.nuc_profile_b, self.nuc_count_w, self.nuc_count_b)
         return acc_profile, acc_count, nuc_profile, nuc_count
 
 

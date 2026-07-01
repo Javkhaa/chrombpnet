@@ -160,10 +160,11 @@ def main():
                 sub = range(s, min(s + args.batch_size, N))
                 seq = np.stack([_fetch_seq(genome, pool['chr'][r], int(pool['center'][r]), IL) for r in sub])
                 x = torch.from_numpy(seq).to(device)
-                feat = model.trunk(x)                      # (b, filters, L')
-                for ci in range(NC):
-                    _, lc = model.accessibility[ci](feat)  # (b,1)
-                    P[list(sub), ci] = lc.squeeze(-1).cpu().numpy()
+                feat = model.trunk(x)                       # (b, filters, L')
+                pooled = feat.mean(dim=-1)                  # (b, filters)
+                # predicted acc log-count for ALL cell types at once
+                Pb = pooled @ model.acc_count_w.t() + model.acc_count_b  # (b, NC)
+                P[list(sub), :] = Pb.cpu().numpy()
 
         valid = ~np.isnan(O).any(axis=1)
         O, P = O[valid], P[valid]
