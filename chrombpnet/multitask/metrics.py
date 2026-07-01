@@ -107,7 +107,10 @@ def log_epoch_to_wandb(wandb_run, ld, examples=None):
             ld = {**ld, 'val/examples': [wandb.Image(f) for f in examples]}
         except Exception as e:  # noqa: BLE001
             print(f"[warn] building wandb images failed: {e}")
-    step = ld.get('epoch')
+    # Use the monotonic global step, not the epoch. With step-based logging the
+    # trainstep logs already advanced wandb's step counter, so logging validation
+    # at the (small) epoch number goes backward and wandb silently drops it.
+    step = ld.get('step', ld.get('epoch'))
     try:
         wandb_run.log(ld, step=step)
         return
