@@ -105,7 +105,7 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
         n = max(lw['n'], 1)
         tl = lw['loss'] / n
         dt = max(time.perf_counter() - lw_state['t0'], 1e-9)
-        print(f"  step={global_step} train_loss={tl:.4f} ({lw['n'] / dt:.0f} samp/s)")
+        print(f"  step={global_step} train_loss={tl:.4f} ({lw['n'] / dt:.0f} samp/s)", flush=True)
         if wandb_run is not None:
             d = {'step': global_step, 'trainstep/loss': tl,
                  'trainstep/grad_norm': lw['grad'] / n,
@@ -129,7 +129,7 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
         va = validate(model, valid_loader, device, args, multicell, val_max_batches)
         n = max(win['n'], 1)
         train_loss, val_loss = win['loss'] / n, va['loss']
-        print(f"epoch={epoch} step={global_step} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+        print(f"epoch={epoch} step={global_step} train_loss={train_loss:.6f} val_loss={val_loss:.6f}", flush=True)
         log.write(f"{epoch},{global_step},{train_loss:.8f},{val_loss:.8f}\n"); log.flush()
         is_best = val_loss < best
         if is_best:
