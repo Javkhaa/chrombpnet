@@ -7,6 +7,7 @@ at each epoch end.
 """
 from __future__ import annotations
 
+import contextlib
 import time
 
 import torch
@@ -42,6 +43,13 @@ def _loss(outputs, targets, args):
                           return_components=True)
 
 
+def _amp_ctx(args, device):
+    """bf16 autocast on CUDA when --amp is set; no-op otherwise."""
+    if getattr(args, 'amp', False) and str(device).startswith('cuda'):
+        return torch.autocast('cuda', dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
+
 @torch.no_grad()
 def validate(model, loader, device, args, multicell, max_batches=0):
     """Mean loss + components over the valid loader (optionally capped to max_batches)."""
@@ -52,8 +60,9 @@ def validate(model, loader, device, args, multicell, max_batches=0):
         if max_batches and i >= max_batches:
             break
         seq, targets, ct = _to_device(batch, device, multicell)
-        outputs = _forward(model, seq, ct)
-        loss, comps = _loss(outputs, targets, args)
+        with _amp_ctx(args, device):
+            outputs = _forward(model, seq, ct)
+            loss, comps = _loss(outputs, targets, args)
         bs = seq.shape[0]
         total += float(loss) * bs
         for k in COMPONENT_KEYS:
@@ -169,8 +178,9 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
             for batch in train_loader:
                 seq, targets, ct = _to_device(batch, device, multicell)
                 optimizer.zero_grad(set_to_none=True)
-                outputs = _forward(model, seq, ct)
-                loss, comps = _loss(outputs, targets, args)
+                with _amp_ctx(args, device):
+                    outputs = _forward(model, seq, ct)
+                    loss, comps = _loss(outputs, targets, args)
                 loss.backward()
                 gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9))
                 optimizer.step()

@@ -159,6 +159,8 @@ def main():
                     help='cap validation to N batches per check (0=full valid set); use with --val-every-steps')
     ap.add_argument('--log-loss-every', type=int, default=0,
                     help='log running train loss to stdout+wandb every N steps (0=off), independent of validation')
+    ap.add_argument('--amp', action='store_true', help='bf16 mixed-precision autocast on CUDA (H100 tensor cores)')
+    ap.add_argument('--compile', action='store_true', help='torch.compile the model')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -204,9 +206,10 @@ def main():
     train_loader = make_loader(train_cat, True)
     valid_loader = make_loader(valid_cat, False)
 
-    model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
-                                    args.filters, args.n_dil_layers).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    raw_model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
+                                        args.filters, args.n_dil_layers).to(device)
+    optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.learning_rate)
+    model = torch.compile(raw_model) if args.compile else raw_model
 
     out = Path(args.output_prefix)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +222,7 @@ def main():
                                name=args.wandb_run_name, config=cfg)
 
     def save_best(val_loss):
-        torch.save({'model_state_dict': model.state_dict(), 'args': vars(args),
+        torch.save({'model_state_dict': raw_model.state_dict(), 'args': vars(args),
                     'cell_types': cell_types, 'val_loss': val_loss}, str(out) + '.pt')
 
     try:
