@@ -182,7 +182,10 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                     outputs = _forward(model, seq, ct)
                     loss, comps = _loss(outputs, targets, args)
                 loss.backward()
-                gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9))
+                # Real gradient clipping when --grad-clip > 0 (1e9 = effectively off).
+                # clip_grad_norm_ returns the pre-clip total norm, which we still log.
+                max_norm = getattr(args, 'grad_clip', 0) or 1e9
+                gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm))
                 optimizer.step()
                 global_step += 1
                 bs = seq.shape[0]
