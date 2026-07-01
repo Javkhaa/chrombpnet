@@ -89,27 +89,71 @@ def main():
     print(f"checkpoint cell types: {len(cell_types)} | split={args.split} chroms={sorted(chroms)}")
 
     # ---------- (A) per-cell-type accuracy ----------
-    per_cell = {}
+    # One DataLoader over ALL cells (parallel IO, GPU inference) -> collect per-example
+    # scalars -> group by cell type. Far faster than a single-threaded loop per cell.
+    from torch.utils.data import ConcatDataset
+    fixed, is_peak_parts, name_by_ci = [], [], {}
     for row in manifest:
         name = row['cell_type']
         if name not in ct_index:
-            print(f"  skip {name}: not in checkpoint heads"); continue
+            continue
         ci = ct_index[name]
         pdf = _subsample(load_regions(row['peaks'], chroms), args.max_peaks, rng)
         ndf = _subsample(load_regions(row['nonpeaks'], chroms), args.max_nonpeaks, rng)
         if pdf is None or len(pdf) == 0:
-            print(f"  skip {name}: no test peaks"); continue
+            continue
         ds = MultiTaskRegionDataset(pdf, ndf, args.genome, row['acc_bw'], row['nuc_bw'],
                                     IL, OL, max_jitter=0, negative_sampling_ratio=1.0,
                                     add_revcomp=False, shuffle=False, seed=args.seed)
-        is_peak = ds.regions['is_peak'].values.astype(bool)
-        idx = np.arange(len(ds))
-        m = M.heldout_metrics(model, _FixedCT(ds, ci), idx, is_peak, device, OL,
-                              batch_size=args.batch_size, multicell=True, prefix='')
-        per_cell[name] = {k.lstrip('/'): v for k, v in m.items()}
-        print(f"  [{name[:42]:42s}] acc r={per_cell[name]['acc/counts_pearson']:.3f} "
-              f"nuc r={per_cell[name]['nuc/counts_pearson']:.3f} "
-              f"AUROC={per_cell[name]['peak_vs_nonpeak_auroc_acc']:.3f}")
+        fixed.append(_FixedCT(ds, ci))
+        is_peak_parts.append(ds.regions['is_peak'].values.astype(bool))
+        name_by_ci[ci] = name
+    cat = ConcatDataset(fixed)
+    is_peak = np.concatenate(is_peak_parts)
+    loader = DataLoader(cat, batch_size=args.batch_size, num_workers=args.num_workers,
+                        shuffle=False, pin_memory=(device.type == 'cuda'))
+    print(f"scoring {len(cat)} regions across {len(fixed)} cell types...")
+    ct_arr = []
+    acc = {'plc': [], 'olc': [], 'jsd': [], 'pear': []}
+    nuc = {'plc': [], 'olc': [], 'jsd': [], 'pear': []}
+    ptr = 0
+    with torch.no_grad():
+        for batch in loader:
+            seq, a_obs, _, n_obs, _, ct = batch
+            bs = seq.shape[0]
+            out = model(seq.to(device), ct.to(device))
+            ct_arr.append(ct.numpy())
+            bpk = is_peak[ptr:ptr + bs]; ptr += bs
+            for store, prof, cnt, obs in ((acc, out[0], out[1], a_obs), (nuc, out[2], out[3], n_obs)):
+                prob = torch.softmax(prof, -1).cpu().numpy()
+                store['plc'].append(cnt.squeeze(-1).cpu().numpy())
+                o = obs.numpy(); store['olc'].append(np.log1p(o.sum(1)))
+                for i in range(bs):
+                    if bpk[i] and o[i].sum() > 0:
+                        store['jsd'].append(M.jsd(prob[i], o[i])); store['pear'].append(M.pearson(prob[i], o[i]))
+                    else:
+                        store['jsd'].append(np.nan); store['pear'].append(np.nan)
+    ct_arr = np.concatenate(ct_arr)
+    for d in (acc, nuc):
+        for k in ('plc', 'olc'):
+            d[k] = np.concatenate(d[k])
+        for k in ('jsd', 'pear'):
+            d[k] = np.array(d[k])
+    per_cell = {}
+    for ci, name in sorted(name_by_ci.items()):
+        m = ct_arr == ci
+        pk = m & is_peak
+        per_cell[name] = {
+            'acc/counts_pearson': M.pearson(acc['plc'][pk], acc['olc'][pk]),
+            'acc/counts_spearman': M.spearman(acc['plc'][pk], acc['olc'][pk]),
+            'acc/profile_jsd': float(np.nanmedian(acc['jsd'][m])),
+            'acc/profile_pearson': float(np.nanmedian(acc['pear'][m])),
+            'nuc/counts_pearson': M.pearson(nuc['plc'][pk], nuc['olc'][pk]),
+            'nuc/counts_spearman': M.spearman(nuc['plc'][pk], nuc['olc'][pk]),
+            'nuc/profile_jsd': float(np.nanmedian(nuc['jsd'][m])),
+            'nuc/profile_pearson': float(np.nanmedian(nuc['pear'][m])),
+            'peak_vs_nonpeak_auroc_acc': M.auroc(acc['plc'][m], is_peak[m]),
+        }
 
     def _avg(key):
         vals = [v[key] for v in per_cell.values() if v[key] == v[key]]
@@ -183,7 +227,14 @@ def main():
     print("\n================ MULTI-CELL EVAL ================")
     print(f"checkpoint: {args.checkpoint}")
     print(f"cell types scored: {len(per_cell)} | split={args.split}")
+    def _dist(key):
+        v = np.array([c[key] for c in per_cell.values() if c[key] == c[key]])
+        return (np.min(v), np.median(v), np.max(v)) if len(v) else (float('nan'),) * 3
+    aq = _dist('acc/counts_pearson'); nq = _dist('nuc/counts_pearson'); auq = _dist('peak_vs_nonpeak_auroc_acc')
     print("\n[A] per-cell-type accuracy (means over cell types):")
+    print(f"  acc counts r  min/med/max = {aq[0]:.3f} / {aq[1]:.3f} / {aq[2]:.3f}")
+    print(f"  nuc counts r  min/med/max = {nq[0]:.3f} / {nq[1]:.3f} / {nq[2]:.3f}")
+    print(f"  acc AUROC     min/med/max = {auq[0]:.3f} / {auq[1]:.3f} / {auq[2]:.3f}")
     print(f"  acc: counts r={means['acc/counts_pearson']:.3f}  profile JSD={means['acc/profile_jsd']:.3f}  profile r={means['acc/profile_pearson']:.3f}")
     print(f"  nuc: counts r={means['nuc/counts_pearson']:.3f}  profile JSD={means['nuc/profile_jsd']:.3f}  profile r={means['nuc/profile_pearson']:.3f}")
     print(f"  peak-vs-nonpeak AUROC (acc): {means['peak_vs_nonpeak_auroc_acc']:.3f}")
