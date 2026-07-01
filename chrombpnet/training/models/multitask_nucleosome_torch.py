@@ -185,7 +185,11 @@ class ConditionedMultiCellModel(nn.Module):
 
     def _film_mod(self, x: torch.Tensor, e: torch.Tensor, i: int) -> torch.Tensor:
         gamma, beta = self.film[i](e).chunk(2, dim=-1)   # (B, filters) each
-        return (1.0 + gamma).unsqueeze(-1) * x + beta.unsqueeze(-1)
+        # Bounded multiplicative scale in (0, 2) via tanh. An unbounded (1 + gamma)
+        # scale compounds across the ~9 FiLM layers and diverges; tanh caps each
+        # layer's gain so the trunk stays stable. Identity at init (gamma=0 -> scale=1).
+        scale = 1.0 + torch.tanh(gamma)
+        return scale.unsqueeze(-1) * x + beta.unsqueeze(-1)
 
     def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
         if seq.shape[1] != 4:
