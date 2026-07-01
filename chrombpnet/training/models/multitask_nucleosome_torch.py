@@ -172,6 +172,9 @@ class ConditionedMultiCellModel(nn.Module):
         self.film = nn.ModuleList([nn.Linear(embed_dim, 2 * filters) for _ in range(n_dil_layers + 1)])
         for lin in self.film:                      # identity init: gamma=0 (-> 1+gamma=1), beta=0
             nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias)
+        # FiLM modulates NORMALIZED features (GroupNorm) so the per-layer gain cannot
+        # compound and diverge -- this is the canonical stable FiLM setup.
+        self.norms = nn.ModuleList([nn.GroupNorm(min(32, filters), filters) for _ in range(n_dil_layers + 1)])
         self.accessibility = ProfileCountHead(filters, outputlen)
         self.nucleosome = ProfileCountHead(filters, outputlen)
 
@@ -196,11 +199,11 @@ class ConditionedMultiCellModel(nn.Module):
             seq = seq.transpose(1, 2)
         e = self.cell_emb(ct_idx)                        # (B, embed_dim)
         x = F.relu(self.first(seq))
-        x = self._film_mod(x, e, 0)
+        x = self._film_mod(self.norms[0](x), e, 0)
         for j, conv in enumerate(self.dilated):
             conv_x = F.relu(conv(x))
             x = conv_x + self._center_crop(x, conv_x.shape[-1])
-            x = self._film_mod(x, e, j + 1)
+            x = self._film_mod(self.norms[j + 1](x), e, j + 1)
         acc_profile, acc_count = self.accessibility(x)
         nuc_profile, nuc_count = self.nucleosome(x)
         return acc_profile, acc_count, nuc_profile, nuc_count
