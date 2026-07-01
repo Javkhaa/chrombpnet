@@ -75,16 +75,42 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
     global_step = 0
     val_every = getattr(args, 'val_every_steps', 0) or 0
     val_max_batches = getattr(args, 'val_max_batches', 0) or 0
+    log_loss_every = getattr(args, 'log_loss_every', 0) or 0
 
     win = {'loss': 0.0, 'n': 0, 'grad': 0.0}
     win.update({k: 0.0 for k in COMPONENT_KEYS})
     state = {'t0': time.perf_counter()}
+
+    # separate fine-grained accumulator for frequent train-loss logging
+    lw = {'loss': 0.0, 'n': 0, 'grad': 0.0}
+    lw.update({k: 0.0 for k in COMPONENT_KEYS})
+    lw_state = {'t0': time.perf_counter()}
 
     def reset_win():
         win['loss'] = win['grad'] = 0.0; win['n'] = 0
         for k in COMPONENT_KEYS:
             win[k] = 0.0
         state['t0'] = time.perf_counter()
+
+    def log_trainstep():
+        n = max(lw['n'], 1)
+        tl = lw['loss'] / n
+        dt = max(time.perf_counter() - lw_state['t0'], 1e-9)
+        print(f"  step={global_step} train_loss={tl:.4f} ({lw['n'] / dt:.0f} samp/s)")
+        if wandb_run is not None:
+            d = {'step': global_step, 'trainstep/loss': tl,
+                 'trainstep/grad_norm': lw['grad'] / n,
+                 'lr': optimizer.param_groups[0]['lr']}
+            for k in COMPONENT_KEYS:
+                d[f'trainstep/{k}'] = lw[k] / n
+            try:
+                wandb_run.log(d, step=global_step)
+            except Exception as e:  # noqa: BLE001
+                print(f"[warn] trainstep log failed at step {global_step}: {e}")
+        for k in COMPONENT_KEYS:
+            lw[k] = 0.0
+        lw['loss'] = lw['grad'] = 0.0; lw['n'] = 0
+        lw_state['t0'] = time.perf_counter()
 
     log = open(log_path, 'w')
     log.write('epoch,step,train_loss,val_loss\n')
@@ -150,9 +176,15 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                 optimizer.step()
                 global_step += 1
                 bs = seq.shape[0]
-                win['loss'] += float(loss.detach()) * bs; win['n'] += bs; win['grad'] += gn * bs
+                lval = float(loss.detach())
+                cvals = {k: float(comps[k]) for k in COMPONENT_KEYS}
+                win['loss'] += lval * bs; win['n'] += bs; win['grad'] += gn * bs
+                lw['loss'] += lval * bs; lw['n'] += bs; lw['grad'] += gn * bs
                 for k in COMPONENT_KEYS:
-                    win[k] += float(comps[k]) * bs
+                    win[k] += cvals[k] * bs
+                    lw[k] += cvals[k] * bs
+                if log_loss_every and global_step % log_loss_every == 0:
+                    log_trainstep()
                 if val_every and global_step % val_every == 0:
                     stop = do_validation(epoch)
                     reset_win()

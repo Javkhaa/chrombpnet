@@ -94,6 +94,8 @@ def main():
                     help='validate/checkpoint/early-stop every N optimizer steps (0=once per epoch)')
     ap.add_argument('--val-max-batches', type=int, default=0,
                     help='cap validation to N batches per check (0=full valid set); use with --val-every-steps')
+    ap.add_argument('--log-loss-every', type=int, default=0,
+                    help='log running train loss to stdout+wandb every N steps (0=off), independent of validation')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
