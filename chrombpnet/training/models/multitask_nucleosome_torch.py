@@ -169,11 +169,12 @@ class ConditionedMultiCellModel(nn.Module):
             for i in range(1, n_dil_layers + 1)
         ])
         # One FiLM generator per conditioned layer (after first conv + each dilated).
-        self.film = nn.ModuleList([nn.Linear(embed_dim, 2 * filters) for _ in range(n_dil_layers + 1)])
-        for lin in self.film:                      # identity init: gamma=0 (-> 1+gamma=1), beta=0
+        # ADDITIVE conditioning: a per-cell-type channel bias on normalized features.
+        # (Multiplicative FiLM -- even bounded + normalized -- diverged here; a pure
+        # additive shift cannot compound across layers, so it is unconditionally stable.)
+        self.film = nn.ModuleList([nn.Linear(embed_dim, filters) for _ in range(n_dil_layers + 1)])
+        for lin in self.film:                      # identity init: bias=0 at start
             nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias)
-        # FiLM modulates NORMALIZED features (GroupNorm) so the per-layer gain cannot
-        # compound and diverge -- this is the canonical stable FiLM setup.
         self.norms = nn.ModuleList([nn.GroupNorm(min(32, filters), filters) for _ in range(n_dil_layers + 1)])
         self.accessibility = ProfileCountHead(filters, outputlen)
         self.nucleosome = ProfileCountHead(filters, outputlen)
@@ -187,12 +188,8 @@ class ConditionedMultiCellModel(nn.Module):
         return x[..., crop:-crop] if crop else x
 
     def _film_mod(self, x: torch.Tensor, e: torch.Tensor, i: int) -> torch.Tensor:
-        gamma, beta = self.film[i](e).chunk(2, dim=-1)   # (B, filters) each
-        # Bounded multiplicative scale in (0, 2) via tanh. An unbounded (1 + gamma)
-        # scale compounds across the ~9 FiLM layers and diverges; tanh caps each
-        # layer's gain so the trunk stays stable. Identity at init (gamma=0 -> scale=1).
-        scale = 1.0 + torch.tanh(gamma)
-        return scale.unsqueeze(-1) * x + beta.unsqueeze(-1)
+        # Additive per-cell-type channel bias on the (already normalized) features.
+        return x + self.film[i](e).unsqueeze(-1)
 
     def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
         if seq.shape[1] != 4:
