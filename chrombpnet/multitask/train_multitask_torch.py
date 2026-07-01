@@ -12,7 +12,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from chrombpnet.multitask import metrics as M
+from chrombpnet.multitask import train_loop
 from chrombpnet.multitask.torch_data import MultiTaskRegionDataset
 from chrombpnet.training.models.multitask_nucleosome_torch import (
     MultiTaskNucleosomeModel,
@@ -53,42 +53,6 @@ def make_loader(args, chroms, revcomp, shuffle, seed):
     return ds, loader
 
 
-COMPONENT_KEYS = ('acc_profile_nll', 'acc_count_mse', 'nuc_profile_nll', 'nuc_count_mse')
-
-
-def run_epoch(model, loader, optimizer, device, args):
-    training = optimizer is not None
-    model.train(training)
-    total = 0.0
-    n = 0
-    comp_sum = {k: 0.0 for k in COMPONENT_KEYS}
-    grad_accum = 0.0
-    for batch in loader:
-        seq, acc, acc_lc, nuc, nuc_lc = [x.to(device, non_blocking=True) for x in batch]
-        bs = seq.shape[0]
-        if training:
-            optimizer.zero_grad(set_to_none=True)
-        with torch.set_grad_enabled(training):
-            outputs = model(seq)
-            loss, comps = multitask_loss(outputs, (acc, acc_lc, nuc, nuc_lc),
-                                         counts_loss_weight=args.counts_loss_weight,
-                                         nucleosome_profile_weight=args.nucleosome_profile_weight,
-                                         nucleosome_counts_weight=args.nucleosome_counts_weight,
-                                         return_components=True)
-            if training:
-                loss.backward()
-                grad_accum += float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9)) * bs
-                optimizer.step()
-        total += float(loss.detach()) * bs
-        for k in COMPONENT_KEYS:
-            comp_sum[k] += float(comps[k]) * bs
-        n += bs
-    n = max(n, 1)
-    result = {'loss': total / n, 'n': n}
-    result.update({k: comp_sum[k] / n for k in COMPONENT_KEYS})
-    if training:
-        result['grad_norm'] = grad_accum / n
-    return result
 
 
 def main():
@@ -126,6 +90,10 @@ def main():
     ap.add_argument('--eval-every', type=int, default=5, help='epochs between held-out metric logging (0=off)')
     ap.add_argument('--eval-subset', type=int, default=2000, help='valid regions used for held-out metrics')
     ap.add_argument('--log-examples', type=int, default=3, help='example predicted-vs-observed plots to log (0=off)')
+    ap.add_argument('--val-every-steps', type=int, default=0,
+                    help='validate/checkpoint/early-stop every N optimizer steps (0=once per epoch)')
+    ap.add_argument('--val-max-batches', type=int, default=0,
+                    help='cap validation to N batches per check (0=full valid set); use with --val-every-steps')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -150,9 +118,6 @@ def main():
     model = MultiTaskNucleosomeModel(args.inputlen, args.outputlen, args.filters, args.n_dil_layers).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    best = float('inf')
-    best_epoch = 0
-    stale = 0
     out = Path(args.output_prefix)
     out.parent.mkdir(parents=True, exist_ok=True)
     log_path = out.with_suffix('.log')
@@ -160,68 +125,23 @@ def main():
     wandb_run = None
     if args.wandb:
         import wandb
-        wandb_run = wandb.init(
-            entity=args.wandb_entity,
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config=vars(args),
-        )
+        wandb_run = wandb.init(entity=args.wandb_entity, project=args.wandb_project,
+                               name=args.wandb_run_name, config=vars(args))
+
+    def save_best(val_loss):
+        torch.save({'model_state_dict': model.state_dict(), 'args': vars(args), 'val_loss': val_loss},
+                   str(out) + '.pt')
 
     try:
-        with open(log_path, 'w') as log:
-            log.write('epoch,train_loss,val_loss\n')
-            for epoch in range(1, args.epochs + 1):
-                train_ds.on_epoch_end()
-                t0 = time.perf_counter()
-                tr = run_epoch(model, train_loader, optimizer, device, args)
-                t1 = time.perf_counter()
-                va = run_epoch(model, valid_loader, None, device, args)
-                t2 = time.perf_counter()
-                train_loss, val_loss = tr['loss'], va['loss']
-                print(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
-                log.write(f"{epoch},{train_loss:.8f},{val_loss:.8f}\n"); log.flush()
-                is_best = val_loss < best
-                if is_best:
-                    best = val_loss
-                    best_epoch = epoch
-                    stale = 0
-                    torch.save({'model_state_dict': model.state_dict(), 'args': vars(args), 'val_loss': best},
-                               str(out) + '.pt')
-                else:
-                    stale += 1
-                if wandb_run is not None:
-                    ld = {'epoch': epoch, 'train/loss': train_loss, 'val/loss': val_loss,
-                          'val/best_loss': best, 'val/best_epoch': best_epoch,
-                          'lr': optimizer.param_groups[0]['lr'],
-                          'train/grad_norm': tr.get('grad_norm', float('nan')),
-                          'time/epoch_sec': t2 - t0,
-                          'time/train_samples_per_sec': tr['n'] / max(t1 - t0, 1e-9)}
-                    for k in COMPONENT_KEYS:
-                        ld[f'train/{k}'] = tr[k]; ld[f'val/{k}'] = va[k]
-                    figs = None
-                    if args.eval_every and (epoch % args.eval_every == 0 or epoch == args.epochs):
-                        try:
-                            ld.update(M.heldout_metrics(model, valid_ds, ev_idx, ev_is_peak,
-                                                        device, args.outputlen, multicell=False, prefix='val'))
-                        except Exception as e:  # noqa: BLE001
-                            print(f"[warn] held-out metrics failed at epoch {epoch}: {e}")
-                        if args.log_examples:
-                            try:
-                                figs = M.example_profile_figures(model, valid_ds, ev_idx, device,
-                                                                 args.outputlen, multicell=False, n=args.log_examples)
-                            except Exception as e:  # noqa: BLE001
-                                print(f"[warn] example plots failed at epoch {epoch}: {e}")
-                    M.log_epoch_to_wandb(wandb_run, ld, examples=figs)
-                    if figs:
-                        import matplotlib.pyplot as plt
-                        for f in figs:
-                            plt.close(f)
-                if not is_best and stale >= args.early_stop_patience:
-                    break
+        best, best_marker = train_loop.fit(
+            model, train_loader, valid_loader, optimizer, device, args,
+            multicell=False, save_best=save_best, log_path=str(log_path),
+            eval_ctx=(valid_ds, ev_idx, ev_is_peak), wandb_run=wandb_run,
+            on_epoch_start=train_ds.on_epoch_end)
         print('saved', str(out) + '.pt')
         if wandb_run is not None:
             wandb_run.summary['best_val_loss'] = best
-            wandb_run.summary['best_epoch'] = best_epoch
+            wandb_run.summary['best_marker'] = best_marker
     finally:
         if wandb_run is not None:
             wandb_run.finish()
