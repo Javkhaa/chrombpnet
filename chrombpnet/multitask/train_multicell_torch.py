@@ -33,7 +33,7 @@ from chrombpnet.multitask import train_loop
 from chrombpnet.multitask.torch_data import MultiTaskRegionDataset
 from chrombpnet.multitask.train_multitask_torch import load_regions
 from chrombpnet.training.models.multitask_nucleosome_torch import (
-    MultiCellMultiTaskModel, multitask_loss,
+    MultiCellMultiTaskModel, ConditionedMultiCellModel, multitask_loss,
 )
 
 
@@ -161,6 +161,9 @@ def main():
                     help='log running train loss to stdout+wandb every N steps (0=off), independent of validation')
     ap.add_argument('--amp', action='store_true', help='bf16 mixed-precision autocast on CUDA (H100 tensor cores)')
     ap.add_argument('--compile', action='store_true', help='torch.compile the model')
+    ap.add_argument('--conditioned', action='store_true',
+                    help='cell-type-conditioned trunk (FiLM on embedding) + shared heads')
+    ap.add_argument('--embed-dim', type=int, default=32, help='cell-type embedding dim (--conditioned)')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -207,16 +210,25 @@ def main():
     train_loader = make_loader(train_cat, True)
     valid_loader = make_loader(valid_cat, False)
 
-    raw_model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
-                                        args.filters, args.n_dil_layers).to(device)
+    if args.conditioned:
+        raw_model = ConditionedMultiCellModel(len(cell_types), args.inputlen, args.outputlen,
+                                              args.filters, args.n_dil_layers, args.embed_dim).to(device)
+    else:
+        raw_model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
+                                            args.filters, args.n_dil_layers).to(device)
     optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.learning_rate)
     if args.compile:
-        # Compile only the static conv trunk. Compiling the whole model would make
-        # torch.compile re-specialize on the data-dependent per-cell-type head loop
-        # (`for ct in unique(ct_idx)`), causing a recompilation storm with many cell
-        # types. The trunk is shape-static and holds the bulk of the FLOPs.
-        raw_model.trunk = torch.compile(raw_model.trunk)
-    model = raw_model
+        if args.conditioned:
+            # Conditioned forward has no data-dependent control flow (FiLM is vectorized),
+            # so the whole model compiles cleanly.
+            model = torch.compile(raw_model)
+        else:
+            # Vectorized-head model: compile only the static trunk (the heads' grouped
+            # conv uses a data-dependent groups=B that we keep eager).
+            raw_model.trunk = torch.compile(raw_model.trunk)
+            model = raw_model
+    else:
+        model = raw_model
 
     out = Path(args.output_prefix)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -28,7 +28,8 @@ from chrombpnet.multitask import metrics as M
 from chrombpnet.multitask.torch_data import MultiTaskRegionDataset, _fetch_seq, _fetch_bw
 from chrombpnet.multitask.train_multitask_torch import load_regions
 from chrombpnet.multitask.train_multicell_torch import parse_manifest
-from chrombpnet.training.models.multitask_nucleosome_torch import MultiCellMultiTaskModel
+from chrombpnet.training.models.multitask_nucleosome_torch import (
+    MultiCellMultiTaskModel, ConditionedMultiCellModel)
 import os
 import pyBigWig
 import pyfaidx
@@ -76,8 +77,12 @@ def main():
     ck = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     a = ck['args']; cell_types = ck['cell_types']
     ct_index = {name: i for i, name in enumerate(cell_types)}
-    model = MultiCellMultiTaskModel(len(cell_types), a['inputlen'], a['outputlen'],
-                                    a['filters'], a['n_dil_layers'])
+    if a.get('conditioned'):
+        model = ConditionedMultiCellModel(len(cell_types), a['inputlen'], a['outputlen'],
+                                          a['filters'], a['n_dil_layers'], a.get('embed_dim', 32))
+    else:
+        model = MultiCellMultiTaskModel(len(cell_types), a['inputlen'], a['outputlen'],
+                                        a['filters'], a['n_dil_layers'])
     model.load_state_dict(ck['model_state_dict'])
     model.to(device).eval()
     IL, OL = a['inputlen'], a['outputlen']
@@ -204,11 +209,13 @@ def main():
                 sub = range(s, min(s + args.batch_size, N))
                 seq = np.stack([_fetch_seq(genome, pool['chr'][r], int(pool['center'][r]), IL) for r in sub])
                 x = torch.from_numpy(seq).to(device)
-                feat = model.trunk(x)                       # (b, filters, L')
-                pooled = feat.mean(dim=-1)                  # (b, filters)
-                # predicted acc log-count for ALL cell types at once
-                Pb = pooled @ model.acc_count_w.t() + model.acc_count_b  # (b, NC)
-                P[list(sub), :] = Pb.cpu().numpy()
+                bs = x.shape[0]
+                # predicted acc log-count for each cell type via the standard forward
+                # (model-agnostic: works for vectorized-head and conditioned models)
+                for ci in range(NC):
+                    ct = torch.full((bs,), ci, dtype=torch.long, device=device)
+                    _, ac, _, _ = model(x, ct)
+                    P[list(sub), ci] = ac.squeeze(-1).cpu().numpy()
 
         valid = ~np.isnan(O).any(axis=1)
         O, P = O[valid], P[valid]

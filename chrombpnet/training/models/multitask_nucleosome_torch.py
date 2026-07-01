@@ -143,6 +143,65 @@ class MultiCellMultiTaskModel(nn.Module):
         return acc_profile, acc_count, nuc_profile, nuc_count
 
 
+class ConditionedMultiCellModel(nn.Module):
+    """Cell-type CONDITIONED trunk (FiLM on a per-cell-type embedding) with SHARED
+    (accessibility, nucleosome) heads. Cell type enters as an input that modulates
+    the sequence representation throughout the trunk, rather than only selecting an
+    output head. Scales to any number of cell types (one embedding vector each) and
+    is a step toward zero-shot transfer to unseen cell types.
+
+    FiLM is initialized to identity (zero-init generators + the ``1 + gamma`` form),
+    so the model starts ~unconditioned and learns modulation. The forward has no
+    data-dependent control flow, so it is torch.compile-friendly as a whole.
+    """
+
+    def __init__(self, n_cell_types: int, inputlen: int = 2114, outputlen: int = 1000,
+                 filters: int = 256, n_dil_layers: int = 8, embed_dim: int = 32):
+        super().__init__()
+        self.inputlen = inputlen
+        self.outputlen = outputlen
+        self.n_cell_types = n_cell_types
+        self.embed_dim = embed_dim
+        self.cell_emb = nn.Embedding(n_cell_types, embed_dim)
+        self.first = nn.Conv1d(4, filters, kernel_size=21, padding=0)
+        self.dilated = nn.ModuleList([
+            nn.Conv1d(filters, filters, kernel_size=3, dilation=2 ** i, padding=0)
+            for i in range(1, n_dil_layers + 1)
+        ])
+        # One FiLM generator per conditioned layer (after first conv + each dilated).
+        self.film = nn.ModuleList([nn.Linear(embed_dim, 2 * filters) for _ in range(n_dil_layers + 1)])
+        for lin in self.film:                      # identity init: gamma=0 (-> 1+gamma=1), beta=0
+            nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias)
+        self.accessibility = ProfileCountHead(filters, outputlen)
+        self.nucleosome = ProfileCountHead(filters, outputlen)
+
+    @staticmethod
+    def _center_crop(x: torch.Tensor, width: int) -> torch.Tensor:
+        diff = x.shape[-1] - width
+        if diff < 0 or diff % 2 != 0:
+            raise ValueError(f"Cannot center-crop length {x.shape[-1]} to {width}")
+        crop = diff // 2
+        return x[..., crop:-crop] if crop else x
+
+    def _film_mod(self, x: torch.Tensor, e: torch.Tensor, i: int) -> torch.Tensor:
+        gamma, beta = self.film[i](e).chunk(2, dim=-1)   # (B, filters) each
+        return (1.0 + gamma).unsqueeze(-1) * x + beta.unsqueeze(-1)
+
+    def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
+        if seq.shape[1] != 4:
+            seq = seq.transpose(1, 2)
+        e = self.cell_emb(ct_idx)                        # (B, embed_dim)
+        x = F.relu(self.first(seq))
+        x = self._film_mod(x, e, 0)
+        for j, conv in enumerate(self.dilated):
+            conv_x = F.relu(conv(x))
+            x = conv_x + self._center_crop(x, conv_x.shape[-1])
+            x = self._film_mod(x, e, j + 1)
+        acc_profile, acc_count = self.accessibility(x)
+        nuc_profile, nuc_count = self.nucleosome(x)
+        return acc_profile, acc_count, nuc_profile, nuc_count
+
+
 def multinomial_nll(true_counts: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     """Mean multinomial negative log likelihood for profile-count targets."""
     true_counts = true_counts.float()
