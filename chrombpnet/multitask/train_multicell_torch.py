@@ -209,7 +209,13 @@ def main():
     raw_model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
                                         args.filters, args.n_dil_layers).to(device)
     optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.learning_rate)
-    model = torch.compile(raw_model) if args.compile else raw_model
+    if args.compile:
+        # Compile only the static conv trunk. Compiling the whole model would make
+        # torch.compile re-specialize on the data-dependent per-cell-type head loop
+        # (`for ct in unique(ct_idx)`), causing a recompilation storm with many cell
+        # types. The trunk is shape-static and holds the bulk of the FLOPs.
+        raw_model.trunk = torch.compile(raw_model.trunk)
+    model = raw_model
 
     out = Path(args.output_prefix)
     out.parent.mkdir(parents=True, exist_ok=True)
