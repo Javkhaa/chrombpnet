@@ -8,6 +8,7 @@ at each epoch end.
 from __future__ import annotations
 
 import contextlib
+import math
 import time
 
 import torch
@@ -171,6 +172,15 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
 
     base_lrs = [g['lr'] for g in optimizer.param_groups]
     warmup = getattr(args, 'warmup_steps', 0) or 0
+    lr_decay = getattr(args, 'lr_decay_steps', 0) or 0   # cosine-decay horizon (0=off)
+
+    def lr_scale(step):  # step = 1-indexed optimizer step
+        if warmup and step <= warmup:
+            return step / warmup
+        if lr_decay:
+            prog = min(1.0, max(0.0, (step - warmup) / max(1, lr_decay - warmup)))
+            return 0.05 + 0.95 * 0.5 * (1.0 + math.cos(math.pi * prog))   # peak -> 5% floor
+        return 1.0
 
     stop = False
     try:
@@ -189,10 +199,10 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                 # clip_grad_norm_ returns the pre-clip total norm, which we still log.
                 max_norm = getattr(args, 'grad_clip', 0) or 1e9
                 gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm))
-                if warmup:  # linear LR warmup -> ramp lr to base over the first `warmup` steps
-                    scale = min(1.0, (global_step + 1) / warmup)
+                if warmup or lr_decay:  # linear warmup -> cosine decay
+                    sc = lr_scale(global_step + 1)
                     for g, blr in zip(optimizer.param_groups, base_lrs):
-                        g['lr'] = blr * scale
+                        g['lr'] = blr * sc
                 optimizer.step()
                 global_step += 1
                 bs = seq.shape[0]
