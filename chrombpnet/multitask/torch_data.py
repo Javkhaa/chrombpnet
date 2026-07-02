@@ -42,13 +42,14 @@ def _fetch_bw(bw, chrom, center, width):
 class MultiTaskRegionDataset(Dataset):
     def __init__(self, peaks_df, nonpeaks_df, genome_fasta, acc_bw_file, nuc_bw_file,
                  inputlen, outputlen, max_jitter, negative_sampling_ratio=1.0,
-                 add_revcomp=True, shuffle=True, seed=0):
+                 add_revcomp=True, shuffle=True, seed=0, nuc_smooth_sigma=0.0):
         self.genome_fasta = genome_fasta
         self.acc_bw_file = acc_bw_file
         self.nuc_bw_file = nuc_bw_file
         self.inputlen = inputlen
         self.outputlen = outputlen
         self.max_jitter = max_jitter
+        self.nuc_smooth_sigma = nuc_smooth_sigma   # Gaussian-smooth the sparse dyad target
         self.negative_sampling_ratio = negative_sampling_ratio
         self.add_revcomp = add_revcomp
         self.shuffle = shuffle
@@ -113,6 +114,11 @@ class MultiTaskRegionDataset(Dataset):
             seq = seq[::-1, ::-1].copy()
             acc = acc[::-1].copy()
             nuc = nuc[::-1].copy()
+        # Smooth the sparse dyad target into an occupancy profile (sum-preserving), so the
+        # profile loss learns the learnable smooth signal instead of raw fragment spikes.
+        if self.nuc_smooth_sigma:
+            from scipy.ndimage import gaussian_filter1d
+            nuc = gaussian_filter1d(nuc, self.nuc_smooth_sigma).astype(np.float32)
         acc_lc = np.log1p(acc.sum(keepdims=True)).astype(np.float32)
         nuc_lc = np.log1p(nuc.sum(keepdims=True)).astype(np.float32)
         return (

@@ -114,6 +114,7 @@ def build_concat(manifest, chroms, args, revcomp, shuffle, seed, blacklist_df):
             args.inputlen, args.outputlen, args.max_jitter if revcomp else 0,
             negative_sampling_ratio=args.negative_sampling_ratio,
             add_revcomp=revcomp, shuffle=shuffle, seed=seed + k,
+            nuc_smooth_sigma=getattr(args, 'nuc_smooth_sigma', 0.0),
         )
         datasets.append(ds)
     return TaggedConcat(datasets)
@@ -168,6 +169,8 @@ def main():
                     help='conditioning: additive bias (stable) or FiLM scale+bias (needs warmup+decay)')
     ap.add_argument('--grad-clip', type=float, default=0.0, help='max grad norm (0=off); needed for FiLM stability')
     ap.add_argument('--warmup-steps', type=int, default=0, help='linear LR warmup over N steps (stabilizes conditioning)')
+    ap.add_argument('--nuc-smooth-sigma', type=float, default=0.0,
+                    help='Gaussian-smooth the sparse nucleosome dyad target (bp); helps the profile head learn occupancy')
     ap.add_argument('--lr-decay-steps', type=int, default=0, help='cosine-decay LR to a 5%% floor over N steps (0=off)')
     args = ap.parse_args()
 
