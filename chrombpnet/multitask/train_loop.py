@@ -169,6 +169,9 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
         model.train(True)
         return (not is_best) and stale >= args.early_stop_patience
 
+    base_lrs = [g['lr'] for g in optimizer.param_groups]
+    warmup = getattr(args, 'warmup_steps', 0) or 0
+
     stop = False
     try:
         for epoch in range(1, args.epochs + 1):
@@ -186,6 +189,10 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                 # clip_grad_norm_ returns the pre-clip total norm, which we still log.
                 max_norm = getattr(args, 'grad_clip', 0) or 1e9
                 gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm))
+                if warmup:  # linear LR warmup -> ramp lr to base over the first `warmup` steps
+                    scale = min(1.0, (global_step + 1) / warmup)
+                    for g, blr in zip(optimizer.param_groups, base_lrs):
+                        g['lr'] = blr * scale
                 optimizer.step()
                 global_step += 1
                 bs = seq.shape[0]

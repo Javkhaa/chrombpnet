@@ -165,6 +165,7 @@ def main():
                     help='cell-type-conditioned trunk (FiLM on embedding) + shared heads')
     ap.add_argument('--embed-dim', type=int, default=32, help='cell-type embedding dim (--conditioned)')
     ap.add_argument('--grad-clip', type=float, default=0.0, help='max grad norm (0=off); needed for FiLM stability')
+    ap.add_argument('--warmup-steps', type=int, default=0, help='linear LR warmup over N steps (stabilizes conditioning)')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
