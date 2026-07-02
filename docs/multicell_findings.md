@@ -17,7 +17,10 @@ conditioning experiment. Everything referenced here is committed on `nucleosome-
   monotonically (acc counts r 0.64→0.70→**0.72**; AUROC 0.58→0.60→**0.635**; specificity
   ~0.90), all with a ~3× smaller model. The blocker was training instability, fixed by
   **warmup → cosine LR decay**. Best model: `model_146_film.pt`. Nucleosome *positioning*
-  (profile r ~0.07) is the one thing conditioning does NOT fix — the isolated next target.
+  is the one thing conditioning does NOT fix — but the raw r≈0.07 is a coverage-noise
+  artifact: on a σ=20 smoothed occupancy profile the model hits **0.37 vs a 0.71 split-half
+  ceiling (52%)**. Smoothing the *training* target doesn't help (a no-op); reweighting the
+  profile loss and adding capacity are the live levers. See **Nucleosome positioning push**.
 
 ## What was built (all committed, entry points registered)
 
@@ -120,6 +123,51 @@ conditioning + a bounded `1+tanh(gamma)` FiLM scale were also necessary. Recipe 
 
 Checkpoints: `model_146.pt` (baseline), `model_146_cond.pt` (additive), `model_146_film.pt`
 (FiLM, best). Backed up to `gs://.../scatac_corpus/model_runs/`.
+
+## Nucleosome positioning push (the isolated weakness)
+
+Positioning (nuc **profile** r) is the one head conditioning does not fix. But the raw
+number (~0.068) is a **measurement artifact**, not the model's true quality:
+
+- The dyad target is one-fragment-wide spikes on sparse coverage; a raw per-base Pearson
+  between two such sparse tracks is near zero **even for two halves of the same data**.
+- Evaluating on a Gaussian-**smoothed** (σ=20 bp) occupancy profile, and reporting the
+  **split-half reproducibility ceiling** (binomial-thin the observed counts into halves,
+  correlate — the max any model could achieve at this coverage), reframes it:
+
+  | Head | profile r (raw) | profile r (σ=20) | ceiling (σ=20) | % of ceiling |
+  |---|---|---|---|---|
+  | accessibility | 0.320 | 0.525 | 0.796 | 66% |
+  | nucleosome | 0.068 | **0.373** | 0.712 | **52%** |
+
+  So the model already captures ~half of the *reproducible* nucleosome positioning signal;
+  raw r≈0.07 was measuring coverage noise, not the model. (`--smooth-sigma` in
+  `chrombpnet-eval-multicell`.)
+
+**Lever 1 — smooth the training target (`--nuc-smooth-sigma 20`): NO-OP.** Trained a full
+FiLM run on the σ=20-smoothed dyad target (occupancy instead of spikes), same recipe. It
+trained perfectly stably (zero divergence — the LR recipe holds), but eval was statistically
+identical to the raw-target FiLM:
+
+| Metric | raw target (`model_146_film`) | σ=20 target (`model_146_film_smooth`) |
+|---|---|---|
+| nuc profile r (σ=20) | 0.373 | **0.371** |
+| acc profile r (σ=20) | 0.525 | 0.526 |
+| acc / nuc counts r | 0.723 / 0.648 | 0.718 / 0.646 |
+| AUROC / specificity | 0.635 / 0.896 | 0.627 / 0.897 |
+
+**Conclusion: target representation is not the bottleneck.** The conv trunk was already
+recovering all the smooth-scale signal from the spiky target; pre-smoothing adds nothing.
+The 0.37-vs-0.71 gap is therefore capacity/optimization or a genuine learnability wall —
+not something reshaping the target can close.
+
+**Lever 2 — up-weight the profile loss (`--nucleosome-profile-weight 4`): in flight.**
+Isolates the reweighting lever against the matched σ=20 weight-1 run above (only the profile
+weight changes). If it lifts nuc profile r above 0.371 (even at the cost of acc), the head
+was optimization-starved → then invest in **capacity (512 filters, fp32)**. If it just
+trades acc down for no nuc gain, positioning is capacity- or coverage-limited → the honest
+next move is 512-fp32 as a last capacity test, else accept ~0.37 and pivot to the cfDNA PoC
+(what positioning was for). Run: `model_146_film_pw4`.
 
 ### (original divergence log, for reference)
 
