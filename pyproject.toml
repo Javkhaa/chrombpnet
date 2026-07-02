@@ -59,6 +59,7 @@ chrombpnet-train-multitask = "chrombpnet.multitask.train_multitask_torch:main"
 chrombpnet-train-multicell = "chrombpnet.multitask.train_multicell_torch:main"
 chrombpnet-eval-multitask = "chrombpnet.multitask.evaluate_multitask:main"
 chrombpnet-eval-multicell = "chrombpnet.multitask.evaluate_multicell:main"
+chrombpnet-cfdna-poc = "chrombpnet.cfdna.run_poc:main"
 
 [tool.setuptools.packages.find]
 include = ["chrombpnet*"]

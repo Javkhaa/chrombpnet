@@ -177,6 +177,12 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     torch.backends.cudnn.benchmark = True  # stable-ish shapes -> faster conv algos
+    # TF32 tensor cores: big fp32 speedup on Ampere/Hopper with negligible accuracy cost.
+    # Critical for the 512-filter path, which must run in fp32 (bf16 hits a pathological
+    # cuDNN kernel for 512-channel dilated convs). Safe, different code path from bf16.
+    torch.set_float32_matmul_precision('high')
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     device = torch.device(args.device)
 
     root = args.manifest_root or os.path.dirname(os.path.abspath(args.manifest))

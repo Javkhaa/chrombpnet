@@ -481,6 +481,37 @@ fragment-length from the outset.
 
 ---
 
+## 8. Phase 0 implementation (`chrombpnet.cfdna`, `chrombpnet-cfdna-poc`)
+
+Phase 0 is implemented and validated at real scale (**146 cell types**, not just GM12878).
+Package `chrombpnet/cfdna/`:
+
+- `reference.py` — build a marker-region panel (union of each cell type's strongest peak
+  summits, de-duplicated onto a genomic grid), reduce each cell type's accessibility + dyad
+  tracks to per-region signal-sum feature vectors, one-vs-rest **marker selection**, and
+  column-normalization into the reference matrix `R` (each cell-type column a distribution
+  over regions, so `R w` with `sum(w)=1` is itself a distribution).
+- `deconvolve.py` — finite-depth **multinomial** mixture simulation (depth = fragment count,
+  so low depth = shot noise), simplex-constrained least squares by **projection-onto-simplex
+  accelerated gradient descent** (NNLS-warm-started; no cvxpy/quadprog dependency), and
+  recovery / detection / conditioning metrics.
+- `run_poc.py` (`chrombpnet-cfdna-poc`) — driver: build `R`, sweep feature sets
+  (acc / nuc / acc+nuc) × depths × mixture scenarios (Dirichlet with `n_active` types;
+  a WBC-dominant 85%-plus-minor regime), report recovery + detection-limit tables + JSON.
+
+**Validation (smoke config, 146 cells, 300 regions):** the loop is correct — **noiseless
+recovery is exact** (Pearson 1.0, RMSE 0) across all feature sets, confirming `R` is
+invertible when well-conditioned. At finite depth (1e4 fragments) fraction recovery is
+**Pearson 0.90–0.99**. **Feature stacking helps conditioning materially, as predicted:**
+`acc+nuc` cond(R)≈230 vs acc-only ≈4100, nuc-only ≈3060. Low-depth **precision** is the
+weak point (0.2–0.6): the solver leaks a little mass onto collinear absent cell types, and
+minor components under an 85% dominant fall below the detection limit at 1e4 fragments —
+i.e. Phase 0 already yields a concrete **detection-limit-vs-depth** curve, the key
+deliverable. Next: richer per-region positioning features (not just windowed sums),
+fragment-length block, robust/regularized solve, and model-imputed references (Role b).
+
+---
+
 ## Appendix: notation
 
 | Symbol | Meaning |
