@@ -164,6 +164,8 @@ def main():
     ap.add_argument('--conditioned', action='store_true',
                     help='cell-type-conditioned trunk (FiLM on embedding) + shared heads')
     ap.add_argument('--embed-dim', type=int, default=32, help='cell-type embedding dim (--conditioned)')
+    ap.add_argument('--cond-mode', choices=['additive', 'film'], default='additive',
+                    help='conditioning: additive bias (stable) or FiLM scale+bias (needs warmup+decay)')
     ap.add_argument('--grad-clip', type=float, default=0.0, help='max grad norm (0=off); needed for FiLM stability')
     ap.add_argument('--warmup-steps', type=int, default=0, help='linear LR warmup over N steps (stabilizes conditioning)')
     ap.add_argument('--lr-decay-steps', type=int, default=0, help='cosine-decay LR to a 5%% floor over N steps (0=off)')
@@ -215,7 +217,8 @@ def main():
 
     if args.conditioned:
         raw_model = ConditionedMultiCellModel(len(cell_types), args.inputlen, args.outputlen,
-                                              args.filters, args.n_dil_layers, args.embed_dim).to(device)
+                                              args.filters, args.n_dil_layers, args.embed_dim,
+                                              cond_mode=args.cond_mode).to(device)
     else:
         raw_model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
                                             args.filters, args.n_dil_layers).to(device)

@@ -79,7 +79,8 @@ def main():
     ct_index = {name: i for i, name in enumerate(cell_types)}
     if a.get('conditioned'):
         model = ConditionedMultiCellModel(len(cell_types), a['inputlen'], a['outputlen'],
-                                          a['filters'], a['n_dil_layers'], a.get('embed_dim', 32))
+                                          a['filters'], a['n_dil_layers'], a.get('embed_dim', 32),
+                                          cond_mode=a.get('cond_mode', 'additive'))
     else:
         model = MultiCellMultiTaskModel(len(cell_types), a['inputlen'], a['outputlen'],
                                         a['filters'], a['n_dil_layers'])

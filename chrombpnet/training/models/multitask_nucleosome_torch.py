@@ -156,24 +156,27 @@ class ConditionedMultiCellModel(nn.Module):
     """
 
     def __init__(self, n_cell_types: int, inputlen: int = 2114, outputlen: int = 1000,
-                 filters: int = 256, n_dil_layers: int = 8, embed_dim: int = 32):
+                 filters: int = 256, n_dil_layers: int = 8, embed_dim: int = 32,
+                 cond_mode: str = 'additive'):
         super().__init__()
         self.inputlen = inputlen
         self.outputlen = outputlen
         self.n_cell_types = n_cell_types
         self.embed_dim = embed_dim
+        self.cond_mode = cond_mode                 # 'additive' (bias) or 'film' (scale+bias)
         self.cell_emb = nn.Embedding(n_cell_types, embed_dim)
         self.first = nn.Conv1d(4, filters, kernel_size=21, padding=0)
         self.dilated = nn.ModuleList([
             nn.Conv1d(filters, filters, kernel_size=3, dilation=2 ** i, padding=0)
             for i in range(1, n_dil_layers + 1)
         ])
-        # One FiLM generator per conditioned layer (after first conv + each dilated).
-        # ADDITIVE conditioning: a per-cell-type channel bias on normalized features.
-        # (Multiplicative FiLM -- even bounded + normalized -- diverged here; a pure
-        # additive shift cannot compound across layers, so it is unconditionally stable.)
-        self.film = nn.ModuleList([nn.Linear(embed_dim, filters) for _ in range(n_dil_layers + 1)])
-        for lin in self.film:                      # identity init: bias=0 at start
+        # Conditioning generators, one per layer, on GroupNorm'd features.
+        # 'additive' -> per-cell channel bias (unconditionally stable).
+        # 'film'     -> bounded scale (1+tanh(gamma)) + bias (more expressive; needs the
+        #               warmup + cosine-decay LR schedule to stay stable).
+        out_dim = filters if cond_mode == 'additive' else 2 * filters
+        self.film = nn.ModuleList([nn.Linear(embed_dim, out_dim) for _ in range(n_dil_layers + 1)])
+        for lin in self.film:                      # identity init (bias/gamma=0 at start)
             nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias)
         self.norms = nn.ModuleList([nn.GroupNorm(min(32, filters), filters) for _ in range(n_dil_layers + 1)])
         self.accessibility = ProfileCountHead(filters, outputlen)
@@ -188,8 +191,11 @@ class ConditionedMultiCellModel(nn.Module):
         return x[..., crop:-crop] if crop else x
 
     def _film_mod(self, x: torch.Tensor, e: torch.Tensor, i: int) -> torch.Tensor:
-        # Additive per-cell-type channel bias on the (already normalized) features.
-        return x + self.film[i](e).unsqueeze(-1)
+        out = self.film[i](e)
+        if self.cond_mode == 'additive':           # per-cell channel bias
+            return x + out.unsqueeze(-1)
+        gamma, beta = out.chunk(2, dim=-1)          # FiLM: bounded scale (0,2) + bias
+        return (1.0 + torch.tanh(gamma)).unsqueeze(-1) * x + beta.unsqueeze(-1)
 
     def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
         if seq.shape[1] != 4:
