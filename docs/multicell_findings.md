@@ -12,10 +12,12 @@ conditioning experiment. Everything referenced here is committed on `nucleosome-
   counts correlation is decent (acc median 0.65); but AUROC plateaus (~0.57) and
   profile/positioning is weak.** It's a validated proof-of-concept, not yet a strong
   predictor.
-- **Cell-type conditioning (to break the AUROC plateau) is unresolved:** every variant
-  tried (multiplicative FiLM ± bound ± GroupNorm, and additive) eventually **diverges**;
-  lower LR delays it. Strong evidence it's an **LR/optimization-schedule** problem, not
-  purely the conditioning mechanism. Parked here.
+- **Cell-type conditioning works (RESOLVED).** Conditioning the trunk on a per-cell-type
+  embedding improves everything, and more expressive = better: **baseline < additive < FiLM**
+  monotonically (acc counts r 0.64→0.70→**0.72**; AUROC 0.58→0.60→**0.635**; specificity
+  ~0.90), all with a ~3× smaller model. The blocker was training instability, fixed by
+  **warmup → cosine LR decay**. Best model: `model_146_film.pt`. Nucleosome *positioning*
+  (profile r ~0.07) is the one thing conditioning does NOT fix — the isolated next target.
 
 ## What was built (all committed, entry points registered)
 
@@ -89,7 +91,37 @@ FS is fine). Key findings:
 - Also fixed: validation metrics were logged at `step=epoch` while trainstep advanced the
   wandb step → wandb silently dropped them; now logged at the global step.
 
-## Cell-type conditioning experiment (UNRESOLVED — negative results)
+## Cell-type conditioning experiment (RESOLVED — conditioning helps; FiLM best)
+
+**Outcome:** conditioning the shared trunk on a per-cell-type embedding *improves* the
+model, and the more expressive the conditioning, the better — a clean monotonic gradient,
+all with a ~3× smaller model (shared heads + embedding vs 146 head-pairs).
+
+| Metric (test chroms, mean over 146) | Baseline (per-cell heads) | Additive cond. | FiLM cond. |
+|---|---|---|---|
+| acc counts r | 0.637 | 0.700 | **0.723** |
+| nuc counts r | 0.589 | 0.628 | **0.648** |
+| peak-vs-nonpeak AUROC | 0.579 | 0.605 | **0.635** |
+| cell-type specificity (centered) | 0.89 | 0.887 | **0.896** |
+| acc / nuc profile r | 0.31 / 0.06 | 0.32 / 0.065 | 0.32 / 0.068 |
+| params | large | 1.8M | 1.8M |
+
+Weakest cell types gained most (acc counts r min 0.38 → 0.52). **Nucleosome positioning
+(profile r ~0.068) is unchanged by conditioning** — the isolated remaining weakness.
+
+**The key that unlocked it — LR schedule.** Every conditioned variant (FiLM and additive)
+initially **diverged** ("stable then explodes"); the fix was **linear warmup → cosine LR
+decay** (`--warmup-steps`, `--lr-decay-steps`). Warmup alone only delayed divergence
+(2.2k→8.6k); adding cosine decay (peak drops through training) removed the sustained-high-LR
+regime and both additive and FiLM then trained stably to convergence. GroupNorm before the
+conditioning + a bounded `1+tanh(gamma)` FiLM scale were also necessary. Recipe that works:
+`--conditioned --cond-mode film --grad-clip 1.0 --warmup-steps 1000 --lr-decay-steps 12000
+--learning-rate 5e-4`.
+
+Checkpoints: `model_146.pt` (baseline), `model_146_cond.pt` (additive), `model_146_film.pt`
+(FiLM, best). Backed up to `gs://.../scatac_corpus/model_runs/`.
+
+### (original divergence log, for reference)
 
 Goal: break the AUROC plateau by making the shared trunk cell-type-aware (FiLM on a
 per-cell-type embedding + shared heads) instead of only per-cell output heads.
