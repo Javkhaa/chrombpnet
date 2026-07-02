@@ -68,6 +68,8 @@ def main():
     ap.add_argument('--num-workers', type=int, default=8)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--smooth-sigma', type=float, default=20.0,
+                    help='Gaussian sigma (bp) for smoothed-profile metrics + reproducibility ceiling')
     ap.add_argument('-o', '--out-json', default=None)
     args = ap.parse_args()
 
@@ -120,8 +122,11 @@ def main():
                         shuffle=False, pin_memory=(device.type == 'cuda'))
     print(f"scoring {len(cat)} regions across {len(fixed)} cell types...")
     ct_arr = []
-    acc = {'plc': [], 'olc': [], 'jsd': [], 'pear': []}
-    nuc = {'plc': [], 'olc': [], 'jsd': [], 'pear': []}
+    from scipy.ndimage import gaussian_filter1d
+    SIG = args.smooth_sigma
+    thin = np.random.default_rng(args.seed)
+    acc = {'plc': [], 'olc': [], 'jsd': [], 'pear': [], 'smpear': [], 'ceil': []}
+    nuc = {'plc': [], 'olc': [], 'jsd': [], 'pear': [], 'smpear': [], 'ceil': []}
     ptr = 0
     with torch.no_grad():
         for batch in loader:
@@ -137,13 +142,20 @@ def main():
                 for i in range(bs):
                     if bpk[i] and o[i].sum() > 0:
                         store['jsd'].append(M.jsd(prob[i], o[i])); store['pear'].append(M.pearson(prob[i], o[i]))
+                        # smoothed-occupancy profile metric + split-half reproducibility ceiling
+                        os_ = gaussian_filter1d(o[i], SIG)
+                        store['smpear'].append(M.pearson(gaussian_filter1d(prob[i], SIG), os_))
+                        oi = o[i].astype(np.int64); A = thin.binomial(oi, 0.5)
+                        store['ceil'].append(M.pearson(gaussian_filter1d(A.astype(float), SIG),
+                                                       gaussian_filter1d((oi - A).astype(float), SIG)))
                     else:
-                        store['jsd'].append(np.nan); store['pear'].append(np.nan)
+                        for k in ('jsd', 'pear', 'smpear', 'ceil'):
+                            store[k].append(np.nan)
     ct_arr = np.concatenate(ct_arr)
     for d in (acc, nuc):
         for k in ('plc', 'olc'):
             d[k] = np.concatenate(d[k])
-        for k in ('jsd', 'pear'):
+        for k in ('jsd', 'pear', 'smpear', 'ceil'):
             d[k] = np.array(d[k])
     per_cell = {}
     for ci, name in sorted(name_by_ci.items()):
@@ -158,6 +170,10 @@ def main():
             'nuc/counts_spearman': M.spearman(nuc['plc'][pk], nuc['olc'][pk]),
             'nuc/profile_jsd': float(np.nanmedian(nuc['jsd'][m])),
             'nuc/profile_pearson': float(np.nanmedian(nuc['pear'][m])),
+            'acc/profile_pearson_smooth': float(np.nanmedian(acc['smpear'][m])),
+            'acc/profile_ceiling_smooth': float(np.nanmedian(acc['ceil'][m])),
+            'nuc/profile_pearson_smooth': float(np.nanmedian(nuc['smpear'][m])),
+            'nuc/profile_ceiling_smooth': float(np.nanmedian(nuc['ceil'][m])),
             'peak_vs_nonpeak_auroc_acc': M.auroc(acc['plc'][m], is_peak[m]),
         }
 
@@ -166,7 +182,9 @@ def main():
         return float(np.mean(vals)) if vals else float('nan')
 
     means = {k: _avg(k) for k in ['acc/counts_pearson', 'acc/profile_jsd', 'acc/profile_pearson',
+                                  'acc/profile_pearson_smooth', 'acc/profile_ceiling_smooth',
                                   'nuc/counts_pearson', 'nuc/profile_jsd', 'nuc/profile_pearson',
+                                  'nuc/profile_pearson_smooth', 'nuc/profile_ceiling_smooth',
                                   'peak_vs_nonpeak_auroc_acc']}
 
     # ---------- (B) cell-type specificity ----------
@@ -243,8 +261,11 @@ def main():
     print(f"  acc counts r  min/med/max = {aq[0]:.3f} / {aq[1]:.3f} / {aq[2]:.3f}")
     print(f"  nuc counts r  min/med/max = {nq[0]:.3f} / {nq[1]:.3f} / {nq[2]:.3f}")
     print(f"  acc AUROC     min/med/max = {auq[0]:.3f} / {auq[1]:.3f} / {auq[2]:.3f}")
-    print(f"  acc: counts r={means['acc/counts_pearson']:.3f}  profile JSD={means['acc/profile_jsd']:.3f}  profile r={means['acc/profile_pearson']:.3f}")
-    print(f"  nuc: counts r={means['nuc/counts_pearson']:.3f}  profile JSD={means['nuc/profile_jsd']:.3f}  profile r={means['nuc/profile_pearson']:.3f}")
+    print(f"  acc: counts r={means['acc/counts_pearson']:.3f}  profile r(raw)={means['acc/profile_pearson']:.3f}  "
+          f"profile r(smooth)={means['acc/profile_pearson_smooth']:.3f} / ceiling {means['acc/profile_ceiling_smooth']:.3f}")
+    print(f"  nuc: counts r={means['nuc/counts_pearson']:.3f}  profile r(raw)={means['nuc/profile_pearson']:.3f}  "
+          f"profile r(smooth)={means['nuc/profile_pearson_smooth']:.3f} / ceiling {means['nuc/profile_ceiling_smooth']:.3f}")
+    print(f"       (smoothed sigma={args.smooth_sigma:.0f}bp; ceiling = split-half reproducibility, the achievable max)")
     print(f"  peak-vs-nonpeak AUROC (acc): {means['peak_vs_nonpeak_auroc_acc']:.3f}")
     if spec:
         print("\n[B] cell-type specificity (accessibility log-counts):")
