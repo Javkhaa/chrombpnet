@@ -512,6 +512,55 @@ fragment-length block, robust/regularized solve, and model-imputed references (R
 
 ---
 
+## 9. Real cfDNA test — Tao 2023 (GSE186573), first attempt (2026-07-02)
+
+First contact with **real plasma cfDNA WGS**: Tao et al. 2023 *Cell Reports Medicine*
+(GSE186573), staged at `gs://prima-mente-sequencing-public/tao_2023_cell_reports_medicine/`.
+86 samples: **25 normal (NC), 26 colorectal (CRC), 35 gastric (STAD)**; per-sample merged
+proper-pair fragment parquets (`processed_data_inhouse/DNA-seq/fragments/`, MAPQ≥50, columns
+chromosome/start/end/strand/**sequence**). Ingestion code: `chrombpnet/cfdna/ingest.py`,
+`chrombpnet/cfdna/deconvolve_real.py` (`chrombpnet-cfdna-deconvolve`).
+
+**Data QC (NC-PKU-mix15, the healthy test sample) — all good:**
+- **hg38** confirmed (chrX max-end 155.70M: above hg19 155.27M, below hg38 156.04M). Matches `R`.
+- **Genuine cfDNA fragmentation:** median 170 bp, modal 165 bp (the ~167 bp mono-nucleosome
+  peak), 94.5% mono-nucleosomal, 2.5% sub-nucleosomal.
+- Coverage **0.28x** (~5.1M fragments) — low, typical cfDNA WGS.
+- My extraction is correct: cfDNA endpoint vs midpoint per-region counts correlate 0.956.
+
+**The deconvolution FAILED — four diagnostics, all pointing the same way:**
+
+| # | Test | Result | Rules out |
+|---|---|---|---|
+| 1 | Per-region deconvolution | recon r≈0, max corr any cell type **−0.009** | direct linear signal at this resolution |
+| 2 | Composite at per-study peak summits | dip sign flips **by source study** | raw summit centering (convention artifact) |
+| 3 | Coverage composite at consensus sites | central **peak** not dip (−0.107) | "just aggregate more" |
+| 4 | **GC-corrected** consensus composite | peak *stronger* (−0.240) | GC bias as the cause |
+
+**Three root causes (in severity order):**
+1. **Reference mismatch (was #1; now largely fixed).** The original 146-cell corpus was
+   fetal/tissue and lacked adult blood — the dominant healthy-cfDNA source. **Fixed 2026-07-02
+   by scaling the corpus to 315 cell types** with Granja/Lareau/Satpathy/Mimitou/Buenrostro
+   blood/immune (lymphoid, monocyte, macrophage, erythroid, megakaryocyte, HSC/GMP/CLP).
+   **Still no mature neutrophils/granulocytes** (PBMC excludes them; scATAC drops them) — the
+   single largest healthy-cfDNA lineage, so keep the CelFiE-style "unknown" component.
+2. **Depth (0.28x → 1.6 fragments/region).** Per-region resolution is Poisson noise; Phase 0
+   predicted collapse here. Requires aggregate features, not per-region.
+3. **Feature engineering / domain gap — the real remaining blocker.** cfDNA fragment density is
+   *anti-correlated* with accessibility (Ulz coverage-dip effect; corr −0.18), so "count
+   fragments in an ATAC peak" measures the inverse of what we want, buried under GC/mappability.
+   The 4 diagnostics fail on the **extraction side**, independent of which cell types are in `R`.
+
+**Verdict / next step (Griffin pipeline — "Plan A", not yet built):** the naive linear
+deconvolution of ATAC references from raw cfDNA per-region density does **not** work. Need the
+literature-standard aggregate approach: **GC-corrected composite coverage / WPS** over
+cell-type-specific marker sites (per-fragment GC is computable from the parquet `sequence`
+column — a self-vs-genome GC-bias reweighting was prototyped). **The decisive gate before
+investing further** is a positive control: reproduce the canonical published **TSS coverage
+dip** (Ulz/Griffin) with proper WPS — needs a GENCODE TSS set, no ATAC reference. If the TSS
+dip reproduces, the method is alive and the blocker is purely feature engineering; if not,
+per-sample deconvolution is not viable at 0.28x. **Start here tomorrow.**
+
 ## Appendix: notation
 
 | Symbol | Meaning |

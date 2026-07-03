@@ -216,6 +216,37 @@ dynamics are the problem.
    persistent weakest head and the one the cfDNA deconvolution idea most depends on —
    worth a dedicated push (higher `--nucleosome-profile-weight`, longer training).
 
+## Capacity, loss-reweight, and corpus-scaling experiments (2026-07-02)
+
+Three follow-ups to the FiLM result, all conditioned FiLM with the stable warmup→cosine
+recipe. Checkpoints + evals backed up to `gs://.../scatac_corpus/model_runs/`.
+
+| Run | Change vs `model_146_film` | nuc profile r (σ20) | AUROC | acc counts r | specificity |
+|---|---|---|---|---|---|
+| `model_146_film` (ref) | — | 0.373 / ceil 0.712 | 0.635 | 0.723 | 0.896 |
+| `model_146_film_smooth` | train on σ20-smoothed nuc target | 0.371 | 0.627 | 0.718 | 0.897 |
+| `model_146_film_pw4` | `--nucleosome-profile-weight 4` | 0.377 | 0.625 | 0.718 | 0.896 |
+| `model_146_film_512` | 512 filters, **fp32** (+TF32) | *(val ~1319; eval pending)* | — | — | — |
+| `model_315_film` | **315 cell types** (corpus 146→315) | 0.324 / ceil 0.772 | 0.628 | 0.721 | 0.837 |
+
+**Nucleosome positioning is stuck at ~0.37 (52% of ceiling).** Three independent levers —
+target-smoothing, 4× profile-loss weight, and (earlier) conditioning — all move it by <0.01.
+Positioning is **not** target-representation- or optimization-limited; it's capacity- or
+coverage-limited. The 512-filter fp32 run (the last capacity lever; bf16 is pathological at
+512 so it needs fp32 + the new TF32 flags) ran to step 58k, val plateaued ~1319 — **its eval
+is still pending** (the one number that would close the capacity question).
+
+**Corpus scaling 146→315 slightly *lowered* per-cell metrics** (specificity 0.896→0.837,
+nuc counts 0.648→0.605). Expected: 315 types is a harder discrimination task trained to the
+same ~10k-step budget, so each cell type is seen ~half as often (~8k vs ~17.5k examples) —
+**undertrained per-cell**, not a regression in method. The retrain's real purpose was to add
+**blood/immune reference cell types** (Granja/Lareau/Satpathy/Mimitou/Buenrostro: CD4/CD8/B/NK,
+monocyte, macrophage, erythroid, megakaryocyte, HSC/GMP/CLP) for the cfDNA work — achieved.
+**No mature neutrophils/granulocytes** (PBMC prep excludes them; scATAC drops them) — the one
+remaining reference gap, handled by an "unknown" deconvolution component. To make the 315 model
+*match* the 146, train ~2× longer (raise `--lr-decay-steps`). TF32 (`set_float32_matmul_precision`)
+was added to the trainer for the fp32-512 path.
+
 ## Infra notes
 
 - Box is a **preemptible instance**; on restart it **lost the `/mnt/data` mount** (no
@@ -226,10 +257,15 @@ dynamics are the problem.
 - wandb key is in `~/.zshrc`; detached runs must inject it
   (`eval "$(grep 'export WANDB_API_KEY' ~/.zshrc | tail -1)"`).
 
-## Current state at stop
+## Current state at stop (2026-07-02, instance being stopped)
 
-- **GPU idle**, no runs in flight. Baseline `model_146.pt` and `model_subset20.pt`
-  present under `/mnt/data/jganbat/scatac_corpus/run/` (needs the mount).
-- wandb project: `prima-mente/jg_experiments` (baseline run `multicell-146-vec`;
-  diverged conditioning runs `multicell-146-cond*`).
-- All code committed + pushed on `nucleosome-head` (through `fc455a5`).
+- **GPU idle**, no runs in flight. All checkpoints/evals backed up to
+  `gs://.../scatac_corpus/model_runs/` (survive the `/mnt/data` mount loss).
+- **Corpus is now 315 cell types**, staged at `/mnt/data/jganbat/scatac_corpus/staged/`
+  (source of truth `gs://.../scatac_corpus/staged/`, manifest 315 rows / 638 bigWigs).
+- wandb: `prima-mente/jg_experiments` — latest run `multicell-315-film` (`fu64exg3`).
+- Code committed + pushed on `nucleosome-head` (cfDNA `ingest.py`/`deconvolve_real.py`,
+  TF32). See `docs/cfdna_deconvolution.md §9` and `docs/HANDOFF_2026-07-02.md` for the
+  cfDNA real-data investigation and next steps.
+- **Pending:** eval of `model_146_film_512` (capacity question); Griffin cfDNA feature
+  pipeline (the real deconvolution blocker).
