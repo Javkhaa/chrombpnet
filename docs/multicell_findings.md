@@ -226,15 +226,16 @@ recipe. Checkpoints + evals backed up to `gs://.../scatac_corpus/model_runs/`.
 | `model_146_film` (ref) | — | 0.373 / ceil 0.712 | 0.635 | 0.723 | 0.896 |
 | `model_146_film_smooth` | train on σ20-smoothed nuc target | 0.371 | 0.627 | 0.718 | 0.897 |
 | `model_146_film_pw4` | `--nucleosome-profile-weight 4` | 0.377 | 0.625 | 0.718 | 0.896 |
-| `model_146_film_512` | 512 filters, **fp32** (+TF32) | *(val ~1319; eval pending)* | — | — | — |
+| `model_146_film_512` | 512 filters, **fp32** (+TF32) | **0.398** / ceil 0.713 | **0.682** | **0.753** | 0.899 |
 | `model_315_film` | **315 cell types** (corpus 146→315) | 0.324 / ceil 0.772 | 0.628 | 0.721 | 0.837 |
 
-**Nucleosome positioning is stuck at ~0.37 (52% of ceiling).** Three independent levers —
-target-smoothing, 4× profile-loss weight, and (earlier) conditioning — all move it by <0.01.
-Positioning is **not** target-representation- or optimization-limited; it's capacity- or
-coverage-limited. The 512-filter fp32 run (the last capacity lever; bf16 is pathological at
-512 so it needs fp32 + the new TF32 flags) ran to step 58k, val plateaued ~1319 — **its eval
-is still pending** (the one number that would close the capacity question).
+**Nucleosome positioning is CAPACITY-limited (resolved 2026-07-03).** Target-smoothing and
+4× profile-loss weight are no-ops at 256 filters (<0.01), but **512 filters (fp32+TF32) is the
+lever that moves it: nuc profile r 0.373→0.398** (52%→56% of ceiling) — and it lifts everything
+else too: **peak AUROC 0.635→0.682** (the bullet-2 win), acc counts r 0.723→0.753, acc profile
+0.525→0.557, specificity 0.896→0.899. So positioning wasn't target-representation- or
+optimization-limited; the shared trunk needed more width. Cost: fp32-512 is ~3.6× slower
+(~930 vs ~3410 samp/s). `model_146_film_512` is the best 146 model.
 
 **Corpus scaling 146→315 slightly *lowered* per-cell metrics** (specificity 0.896→0.837,
 nuc counts 0.648→0.605). Expected: 315 types is a harder discrimination task trained to the

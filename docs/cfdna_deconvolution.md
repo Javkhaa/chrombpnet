@@ -561,6 +561,31 @@ dip** (Ulz/Griffin) with proper WPS — needs a GENCODE TSS set, no ATAC referen
 dip reproduces, the method is alive and the blocker is purely feature engineering; if not,
 per-sample deconvolution is not viable at 0.28x. **Start here tomorrow.**
 
+### 9a. TSS positive control — PASSED (2026-07-03)
+
+Ran it (`chrombpnet/cfdna/tss_positive_control.py`): composite cfDNA coverage / dyad-midpoint / WPS around
+**20,033 protein-coding TSS** (Ensembl GRCh38, `chr`-prefixed), strand-oriented, GC-corrected
+(per-fragment GC from the parquet `sequence` column, reweighted vs genome-expected GC).
+
+| Composite (NC-PKU-mix15) | central dip |
+|---|---|
+| coverage (GC-corrected) | **+0.185** |
+| dyad-midpoint | +0.181 |
+| WPS | +0.212 |
+| **matched random positions (control)** | **+0.012** |
+
+**The canonical Ulz/Snyder TSS nucleosome dip reproduces cleanly** (15× the random control,
+GC-corrected on both sides). **Conclusion: the method and the 0.28x data are alive.** The four
+§9 failures were **site-definition + resolution** artifacts — raw ATAC peak *summits* are
+convention-confounded and not strand-oriented, and per-region counting is too sparse — **not** a
+fundamental inability to extract cell-of-origin signal.
+
+**Gate result → build the Griffin pipeline.** The path is now clear: GC-corrected composite
+coverage / WPS over **clean, strand-oriented, cell-type-specific marker sites** (differential
+accessible sites per cell type, centered consistently — NOT raw per-study summits) against the
+315-cell reference, then deconvolve the composite-derived feature vector. Egress note: box is
+GCS-only + GitHub-raw/Ensembl/PyPI reachable (UCSC blocked); GTF pulled from Ensembl release-110.
+
 ## Appendix: notation
 
 | Symbol | Meaning |
