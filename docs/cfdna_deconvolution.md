@@ -622,6 +622,35 @@ Caveats: within-hematopoietic subtype fractions are collinear (trust lineage tot
 T-cell-subset splits); no neutrophils in the reference (that fraction -> "unknown"). Pending:
 deep NC-PKU-10 (10x, robustness) and a CRC/STAD cancer sample (tumor/epithelial positive control).
 
+### 9c. Solver correction + validated results (2026-07-03, supersedes 9b's specific numbers)
+
+A specificity spike-in test (`chrombpnet/cfdna/spike_test.py`, `grouping_sweep.py`) exposed a
+solver bug: with **noiseless** synthetic input `y = R w*`, the original settings recovered
+**100% epithelial → 6% epithelial** — mass spread onto the collinear blood block. The 9b
+"88.7% hematopoietic" therefore used a **blood-biased solver** (it looked right only because
+healthy plasma really is mostly blood). Two culprits: the **`l2=1e-3` ridge** (spreads mass
+across collinear columns) and the flat **unknown column**. Fix: **`l2=0`** + `unknown=mean`;
+validated — noiseless recovery is now exact at every granularity (`100% epi → 100% epi`,
+`50/50 → 50/50`), minor fractions degrade gracefully with depth (10% epi → 0.04 at 100k
+panel-fragments).
+
+**Corrected, validated results (solver now recovers known compositions):**
+- **Healthy plasma (deep NC-PKU-10, ~3x) → 84–97% hematopoietic, stable across all
+  granularities** — a *distributed* blood composition (erythroid-heavy + NK/T/CLP) plus a
+  noisy ~10% endothelial component. Roughly matches the known healthy-cfDNA composition
+  (Moss/Loyfer). **This is the real, trustworthy result** (the ~90% survives the solver fix).
+- **Cancer (CRC-PKU-32) → 90–100% hematopoietic at every granularity, no tumor/epithelial
+  signal.** The only non-blood component (~0–16% endothelial) is noise-level and *no higher
+  than in healthy*, so it does not distinguish them. **Minor-fraction cancer detection is not
+  achieved** — consistent with low ctDNA + the quantified sensitivity limit (~4–6% at panel
+  depth; chr1/3/6 markers only).
+
+**Honest scope:** the method robustly recovers the **dominant lineage** (blood-dominant plasma,
+correctly, validated) but **cannot yet resolve minor tissue/tumor fractions** at this depth +
+marker panel. Levers to push sensitivity: genome-wide markers (more sites), the **nucleosome-dyad
+channel** (less collinear signal — currently unused), model-denoised/imputed references (Role b),
+and higher-ctDNA samples.
+
 ## Appendix: notation
 
 | Symbol | Meaning |

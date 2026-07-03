@@ -36,8 +36,9 @@ def main():
     ap.add_argument("--n-regions",type=int,default=8000); ap.add_argument("--top-per-cell",type=int,default=400)
     ap.add_argument("--markers-per-group",type=int,default=400); ap.add_argument("--half-width",type=int,default=500)
     ap.add_argument("--W",type=int,default=1000); ap.add_argument("--bin",type=int,default=10)
-    ap.add_argument("--merge-corr",type=float,default=0.90,help="merge cell types with signature corr above this")
+    ap.add_argument("--merge-corr",type=float,default=0.70,help="merge cell types with signature corr above this (0.7 keeps R well-conditioned)")
     ap.add_argument("--jobs",type=int,default=12); ap.add_argument("--cache",default=None)
+    ap.add_argument("--prof-cache",default=None,help="cache/load cfDNA region coverage profiles (fast granularity sweeps)")
     ap.add_argument("-o","--out-json",default=None)
     a=ap.parse_args()
     root=a.manifest_root or os.path.dirname(os.path.abspath(a.manifest))
@@ -74,13 +75,19 @@ def main():
     Zm=(cg-rm)/rs; markers={gi:np.argsort(Zm[:,gi])[::-1][:a.markers_per_group] for gi in range(G)}
     R=np.zeros((G,G))
     for k in range(G): R[k]=Agrp[markers[k]].mean(0)
-    # --- cfDNA ---
+    # --- cfDNA (region coverage profiles cached per sample; independent of grouping) ---
     print("cfDNA profiles ...",flush=True)
-    frby,nfr=load_frags_gc(a.cfdna,a.genome,a.chroms); print(f"  frags={nfr:,}",flush=True)
-    prof=region_profiles(frby,regions,a.W,a.bin)
+    if a.prof_cache and os.path.exists(a.prof_cache):
+        prof=np.load(a.prof_cache)["prof"]; print(f"  loaded cached profiles {prof.shape}",flush=True)
+    else:
+        frby,nfr=load_frags_gc(a.cfdna,a.genome,a.chroms); print(f"  frags={nfr:,}",flush=True)
+        prof=region_profiles(frby,regions,a.W,a.bin)
+        if a.prof_cache: np.savez(a.prof_cache,prof=prof); print(f"  cached profiles -> {a.prof_cache}",flush=True)
     y=np.array([dip_of(prof[markers[k]].sum(0)) for k in range(G)])
     Rn=R/(R.sum(0,keepdims=True)+1e-12); yn=np.clip(y,0,None); yn=yn/(yn.sum()+1e-12)
-    u=np.full((G,1),1.0/G); Rw=np.hstack([Rn,u]); w=dc.deconvolve(yn,Rw,l2=1e-3)
+    # l2=0 (ridge biases toward the collinear blood block; validated via spike-in),
+    # unknown column = mean-of-R (absorbs missing cell types without breaking recovery)
+    u=Rn.mean(1,keepdims=True); Rw=np.hstack([Rn,u]); w=dc.deconvolve(yn,Rw,l2=0.0,iters=8000)
     recon=float(np.corrcoef(yn,Rw@w)[0,1])
     labels=[group_label(m) for m in gmembers]+["__unknown__"]
     heme_g=[is_heme(gmembers[gi][0]) or any(is_heme(m) for m in gmembers[gi]) for gi in range(G)]
