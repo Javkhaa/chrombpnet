@@ -586,6 +586,42 @@ accessible sites per cell type, centered consistently — NOT raw per-study summ
 315-cell reference, then deconvolve the composite-derived feature vector. Egress note: box is
 GCS-only + GitHub-raw/Ensembl/PyPI reachable (UCSC blocked); GTF pulled from Ensembl release-110.
 
+### 9b. Working deconvolution — healthy plasma → 88.7% hematopoietic (2026-07-03)
+
+Built the Griffin-style pipeline (`chrombpnet/cfdna/`: `griffin_deconv.py` fine,
+`griffin_lineage.py` coarse, `griffin_grouped.py` similarity-grouped) and it **works**:
+healthy plasma (NC-PKU-mix15, 0.28x) deconvolves to **88.7% hematopoietic**, dominated by
+adult peripheral-blood immune cells (effector/central-memory CD8/CD4 T, myeloid progenitor,
+NK, MAIT, dendritic, erythroid). **Passes the Snyder/Moss healthy-plasma sanity check.**
+Result: `gs://.../nucleosome_deconv/results/griffin_grouped_NC_c90.json`.
+
+The debugging progression (all on the *same* 0.28x sample) shows exactly what mattered:
+
+| reference | hematopoietic mass |
+|---|---|
+| 315 all cell types (fine) | ~0 (fetal neurons absorb mass) |
+| 216 adult (drop fetal) | 0.41 (MCF7 cell line now top) |
+| 213 adult, no cell lines | 0.12 (retina absorbs — unstable) |
+| 9 fixed lineages | 0 (lineage-mean markers destroy signal) |
+| **244 adult-346, fine markers, grouped** | **0.887** ✓ |
+
+**Four things made it work:** (1) **aggregate composite** GC-corrected coverage-dip over
+cell-type-specific marker sites (per-region fails; TSS positive control §9a confirmed the
+signal); (2) **adult peripheral-blood references** — the top hits are the **Satpathy2019 PBMC**
+cells added in the 346-cell corpus update (adult plasma is adult circulating immune cells; the
+earlier fetal/BM-only reference could not match them); (3) **drop domain-mismatched confounders**
+(fetal Domcke2020, Pierce2021 cell lines) that were absorbing mass; (4) **aggregate the ANSWER,
+not the markers** — fine per-cell-type markers preserve the signal, lineage-mean markers blur it
+away (hence the 9-lineage heme=0 vs fine heme=0.887). Sum fine fractions to lineages post-hoc.
+
+**Notably this is at 0.28x** — depth was *not* the blocker; the missing adult-blood reference
+was. The multitask model is **not used** here (deconvolution is built from observed bigWig
+tracks, "Role a"); model-imputed references ("Role b") remain a future enhancement.
+
+Caveats: within-hematopoietic subtype fractions are collinear (trust lineage totals, not
+T-cell-subset splits); no neutrophils in the reference (that fraction -> "unknown"). Pending:
+deep NC-PKU-10 (10x, robustness) and a CRC/STAD cancer sample (tumor/epithelial positive control).
+
 ## Appendix: notation
 
 | Symbol | Meaning |
