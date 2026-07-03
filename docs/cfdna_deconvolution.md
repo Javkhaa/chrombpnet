@@ -651,6 +651,37 @@ marker panel. Levers to push sensitivity: genome-wide markers (more sites), the 
 channel** (less collinear signal — currently unused), model-denoised/imputed references (Role b),
 and higher-ctDNA samples.
 
+### 9d. Nucleosome channel + Role-b (model-predicted references) — both NEGATIVE (2026-07-03)
+
+Two attempts to push past the accessibility-only, observed-track deconvolution:
+
+**(1) Nucleosome-dyad channel** (`chrombpnet/cfdna/griffin_multichannel.py`: acc coverage-dip +
+nuc fragment-midpoint-peak, from the *observed* dyad tracks). The nuc reference is genuinely
+**less collinear** (cond 1093 vs acc 1605) and recovers the noiseless spike-in — but on real
+cfDNA it is **noisy and unreliable**: nuc-only gives healthy heme 0.83 vs cancer heme 0.00
+(wildly inconsistent between similar samples), and **acc+nuc HURTS** (drags acc's reliable 0.98
+down to 0.14 on CRC). Verdict: observed nucleosome-dyad tracks are too noisy to help.
+
+**(2) Role-b: model-predicted references** (`predict_refs.py`: 346-model `expm1(count head)` per
+region per cell → `griffin_ANpred_adult346.npz`). **FAILS decisively.** The model denoises by
+regressing toward a near-universal accessibility pattern: predicted per-cell-type distributions
+correlate **0.985** (median) vs observed **0.549** — i.e. all 244 cells' predicted patterns are
+nearly identical in *shape*, differing only in magnitude. The similarity grouping collapses them
+to **G=1** → no cell-type-discriminative markers → deconvolution impossible. Observed noisy tracks
+retain far more cell-type-specific spatial structure. **Noise beat denoising.**
+
+**Model limitation exposed:** the conditioned FiLM model captures cell-type identity as a global
+level/scaling (decent centered specificity 0.85 = a magnitude signal) but **not as a distinct
+spatial accessibility pattern** ("which regions are open *in this cell type*" is largely shared /
+sequence-dominated). Until the model has stronger cell-type-specific *spatial* conditioning (or a
+different prediction target — e.g. the profile head, untried), it cannot serve as a cfDNA reference.
+
+**Net:** neither the nucleosome channel nor the retrained model improves the deconvolution. The
+**observed-accessibility** approach remains the best reference. Working result unchanged: healthy
+composition recovers robustly (~90% hematopoietic, solver-validated §9c); minor-fraction cancer
+detection remains signal-limited and is not rescued by the model. The 346 model (`model_346_film_512long`,
+val 1327, converged) is a good general model but not a cfDNA-reference upgrade.
+
 ## Appendix: notation
 
 | Symbol | Meaning |

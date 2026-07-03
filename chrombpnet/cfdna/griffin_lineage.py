@@ -26,11 +26,17 @@ def load_frags_gc(cfdna,hg38,chroms):
     t=pq.read_table(cfdna,columns=["chromosome","start_position","end_position","sequence"])
     ch=t.column("chromosome").to_numpy(zero_copy_only=False)
     s=t.column("start_position").to_numpy().astype(np.int64); e=t.column("end_position").to_numpy().astype(np.int64)
-    seq=t.column("sequence").combine_chunks(); b=seq.buffers()
-    offs=np.frombuffer(b[1],dtype=np.int32); vals=np.frombuffer(b[2],dtype=np.uint8)
-    n=len(ch); st_,en_=offs[:n],offs[1:n+1]
-    isgc=((vals==71)|(vals==67)|(vals==103)|(vals==99)).astype(np.int64); cz=np.concatenate([[0],np.cumsum(isgc)])
-    gcf=np.where((en_-st_)>0,(cz[en_]-cz[st_])/np.maximum(en_-st_,1),0.5)
+    # per-fragment GC, computed chunk-wise (deep samples exceed the 2GB int32 offset
+    # limit of Arrow `binary`, so combine_chunks() overflows -- process each chunk instead)
+    gc_parts=[]
+    for chunk in t.column("sequence").chunks:
+        o=chunk.offset; nb=len(chunk); bb=chunk.buffers()
+        offs=np.frombuffer(bb[1],dtype=np.int32)[o:o+nb+1].astype(np.int64)
+        vals=np.frombuffer(bb[2],dtype=np.uint8)
+        isgc=((vals==71)|(vals==67)|(vals==103)|(vals==99)).astype(np.int64); cz=np.concatenate([[0],np.cumsum(isgc)])
+        s0,e0=offs[:-1],offs[1:]
+        gc_parts.append(np.where((e0-s0)>0,(cz[e0]-cz[s0])/np.maximum(e0-s0,1),0.5))
+    gcf=np.concatenate(gc_parts) if gc_parts else np.full(len(ch),0.5)
     L=e-s;keep=(L>=100)&(L<=250);ch,s,e,gcf=ch[keep],s[keep],e[keep],gcf[keep];Lk=L[keep]
     fa=pyfaidx.Fasta(hg38);rng=np.random.default_rng(0);N=150000;sz={c:len(fa[c]) for c in chroms}
     Ls=Lk[rng.integers(0,len(Lk),N)];egc=[]
