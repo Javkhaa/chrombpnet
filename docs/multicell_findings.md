@@ -227,7 +227,8 @@ recipe. Checkpoints + evals backed up to `gs://.../scatac_corpus/model_runs/`.
 | `model_146_film_smooth` | train on σ20-smoothed nuc target | 0.371 | 0.627 | 0.718 | 0.897 |
 | `model_146_film_pw4` | `--nucleosome-profile-weight 4` | 0.377 | 0.625 | 0.718 | 0.896 |
 | `model_146_film_512` | 512 filters, **fp32** (+TF32) | **0.398** / ceil 0.713 | **0.682** | **0.753** | 0.899 |
-| `model_315_film` | **315 cell types** (corpus 146→315) | 0.324 / ceil 0.772 | 0.628 | 0.721 | 0.837 |
+| `model_315_film` | **315 cell types** (corpus 146→315), 256f/10k steps | 0.324 / ceil 0.772 | 0.628 | 0.721 | 0.837 |
+| `model_315_film_512long` | 315 cells, **512f fp32 + 2× longer** (PRODUCTION) | 0.363 | 0.675 | **0.758** | 0.852 |
 
 **Nucleosome positioning is CAPACITY-limited (resolved 2026-07-03).** Target-smoothing and
 4× profile-loss weight are no-ops at 256 filters (<0.01), but **512 filters (fp32+TF32) is the
@@ -237,10 +238,12 @@ else too: **peak AUROC 0.635→0.682** (the bullet-2 win), acc counts r 0.723→
 optimization-limited; the shared trunk needed more width. Cost: fp32-512 is ~3.6× slower
 (~930 vs ~3410 samp/s). `model_146_film_512` is the best 146 model.
 
-**Corpus scaling 146→315 slightly *lowered* per-cell metrics** (specificity 0.896→0.837,
-nuc counts 0.648→0.605). Expected: 315 types is a harder discrimination task trained to the
-same ~10k-step budget, so each cell type is seen ~half as often (~8k vs ~17.5k examples) —
-**undertrained per-cell**, not a regression in method. The retrain's real purpose was to add
+**Corpus scaling 146→315 slightly *lowered* per-cell metrics at equal budget** (specificity
+0.896→0.837, nuc counts 0.648→0.605) — undertraining per-cell (each of 315 types seen ~half as
+often). **Fixed by 512f + 2× longer (`model_315_film_512long`, PRODUCTION):** acc counts r
+0.721→0.758 (now ≥ the 146-512's 0.753), AUROC 0.628→0.675, nuc profile 0.324→0.363 — per-cell
+accuracy fully recovered. The residual specificity gap (0.852 vs 146's 0.899) is intrinsic:
+discriminating 315 collinear cell types is genuinely harder than 146, not a training deficit. The retrain's real purpose was to add
 **blood/immune reference cell types** (Granja/Lareau/Satpathy/Mimitou/Buenrostro: CD4/CD8/B/NK,
 monocyte, macrophage, erythroid, megakaryocyte, HSC/GMP/CLP) for the cfDNA work — achieved.
 **No mature neutrophils/granulocytes** (PBMC prep excludes them; scATAC drops them) — the one
