@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cfDNA Deconvolution — Methods Overview</title>
+<style>
+  :root{
+    --ground:#FBFCFD; --surface:#F2F6F8; --surface-2:#EAF0F3;
+    --ink:#172029; --muted:#566673; --faint:#8496A1; --rule:#E0E8EC;
+    --accent:#0E7C86; --accent-soft:#DBEDEF; --accent-ink:#0A5A62;
+    --warm:#B0521C; --warm-soft:#F5E6DA; --good:#1E7A4D; --good-soft:#DCEFE4;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,sans-serif;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ground:#0E141A; --surface:#161F27; --surface-2:#1D2831;
+      --ink:#E7EEF3; --muted:#96A6B2; --faint:#697A86; --rule:#26313B;
+      --accent:#40B7C3; --accent-soft:#133037; --accent-ink:#8FD8E0;
+      --warm:#E28A48; --warm-soft:#2E2117; --good:#4FB07E; --good-soft:#16281F;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#FBFCFD; --surface:#F2F6F8; --surface-2:#EAF0F3;
+    --ink:#172029; --muted:#566673; --faint:#8496A1; --rule:#E0E8EC;
+    --accent:#0E7C86; --accent-soft:#DBEDEF; --accent-ink:#0A5A62;
+    --warm:#B0521C; --warm-soft:#F5E6DA; --good:#1E7A4D; --good-soft:#DCEFE4;
+  }
+  :root[data-theme="dark"]{
+    --ground:#0E141A; --surface:#161F27; --surface-2:#1D2831;
+    --ink:#E7EEF3; --muted:#96A6B2; --faint:#697A86; --rule:#26313B;
+    --accent:#40B7C3; --accent-soft:#133037; --accent-ink:#8FD8E0;
+    --warm:#E28A48; --warm-soft:#2E2117; --good:#4FB07E; --good-soft:#16281F;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:860px;margin:0 auto;padding:0 24px 96px;}
+  .col{max-width:64ch;}
+  a{color:var(--accent-ink);text-underline-offset:2px;}
+
+  /* header */
+  header.top{padding:64px 0 40px;border-bottom:1px solid var(--rule);margin-bottom:8px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 14px;}
+  h1{font-family:var(--serif);font-weight:600;font-size:40px;line-height:1.12;margin:0 0 16px;
+    letter-spacing:-.01em;text-wrap:balance;}
+  .lede{font-size:18px;color:var(--muted);max-width:60ch;margin:0;}
+  .meta{margin-top:24px;display:flex;flex-wrap:wrap;gap:8px 10px;}
+  .chip{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--surface);
+    border:1px solid var(--rule);border-radius:999px;padding:4px 11px;}
+
+  /* contents */
+  nav.toc{margin:32px 0 8px;display:flex;flex-wrap:wrap;gap:8px;}
+  nav.toc a{font-size:13px;color:var(--muted);text-decoration:none;background:var(--surface);
+    border:1px solid var(--rule);border-radius:7px;padding:6px 11px;transition:.15s;}
+  nav.toc a:hover{color:var(--accent-ink);border-color:var(--accent);background:var(--accent-soft);}
+
+  section{padding:44px 0 8px;}
+  h2{font-family:var(--serif);font-weight:600;font-size:27px;margin:0 0 6px;letter-spacing:-.01em;
+    scroll-margin-top:20px;}
+  h2 .num{font-family:var(--mono);font-size:14px;color:var(--accent);font-weight:400;margin-right:12px;
+    letter-spacing:.05em;vertical-align:middle;}
+  .sub{color:var(--muted);margin:0 0 22px;max-width:62ch;}
+  h3{font-size:16px;margin:26px 0 6px;letter-spacing:-.005em;}
+  p{margin:0 0 14px;}
+  p.col,ul.col{max-width:64ch;}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:1px 6px;
+    border-radius:5px;color:var(--ink);border:1px solid var(--rule);}
+  strong{font-weight:640;}
+
+  /* method card */
+  .card{background:var(--surface);border:1px solid var(--rule);border-radius:14px;
+    padding:26px 28px;margin:20px 0;}
+  .card .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.06em;color:var(--accent);
+    text-transform:uppercase;margin:0 0 4px;}
+  .card h3{margin-top:0;font-size:20px;font-family:var(--serif);font-weight:600;}
+  .grid4{display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:18px;
+    background:var(--rule);border:1px solid var(--rule);border-radius:10px;overflow:hidden;}
+  .grid4>div{background:var(--surface);padding:15px 17px;}
+  .grid4 .lab{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--faint);margin:0 0 5px;}
+  .grid4 .val{font-size:14.5px;color:var(--ink);line-height:1.5;}
+  @media(max-width:620px){.grid4{grid-template-columns:1fr;}}
+
+  /* formula / feature callout */
+  .formula{font-family:var(--mono);font-size:14px;background:var(--surface-2);border:1px solid var(--rule);
+    border-left:3px solid var(--accent);border-radius:8px;padding:14px 18px;margin:16px 0;
+    overflow-x:auto;line-height:1.7;color:var(--ink);}
+  .formula .c{color:var(--muted);}
+
+  /* glossary */
+  dl.gloss{margin:8px 0 0;display:grid;grid-template-columns:200px 1fr;gap:0;
+    border-top:1px solid var(--rule);}
+  dl.gloss>div{display:contents;}
+  dl.gloss dt{grid-column:1;font-family:var(--mono);font-size:13.5px;color:var(--accent-ink);
+    padding:15px 18px 15px 0;border-bottom:1px solid var(--rule);font-weight:500;}
+  dl.gloss dd{grid-column:2;margin:0;padding:15px 0;border-bottom:1px solid var(--rule);
+    color:var(--ink);font-size:15px;}
+  dl.gloss dd .why{color:var(--muted);font-size:13.5px;display:block;margin-top:3px;}
+  @media(max-width:620px){dl.gloss{grid-template-columns:1fr;}
+    dl.gloss dt{border-bottom:none;padding-bottom:2px;}dl.gloss dd{padding-top:4px;}}
+
+  /* tables */
+  .twrap{overflow-x:auto;margin:14px 0;border:1px solid var(--rule);border-radius:10px;}
+  table{border-collapse:collapse;width:100%;font-size:14.5px;}
+  th,td{text-align:left;padding:12px 15px;border-bottom:1px solid var(--rule);vertical-align:top;}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--faint);font-weight:500;background:var(--surface);}
+  tr:last-child td{border-bottom:none;}
+  td.mono,th.mono{font-family:var(--mono);font-variant-numeric:tabular-nums;}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 9px;border-radius:999px;
+    font-weight:500;letter-spacing:.03em;white-space:nowrap;}
+  .tag.ok{background:var(--good-soft);color:var(--good);}
+  .tag.no{background:var(--warm-soft);color:var(--warm);}
+
+  /* callout */
+  .note{border-radius:12px;padding:18px 22px;margin:22px 0;font-size:15px;}
+  .note.scope{background:var(--warm-soft);border:1px solid color-mix(in srgb,var(--warm) 30%,transparent);}
+  .note.key{background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);}
+  .note .nl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--warm);margin:0 0 6px;}
+  .note.key .nl{color:var(--accent-ink);}
+
+  footer{margin-top:56px;padding-top:24px;border-top:1px solid var(--rule);color:var(--faint);
+    font-size:13px;}
+</style>
+</head>
+<body>
+
+
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Methods &amp; Algorithm Reference</p>
+  <h1>Reading cell types out of cell-free DNA</h1>
+  <p class="lede">Two independent ways we infer which cell types a plasma cfDNA sample came from —
+    what each measures, how the algorithm works, and how to read every number it produces.</p>
+  <div class="meta">
+    <span class="chip">chrombpnet/cfdna</span>
+    <span class="chip">reference: 346-cell scATAC</span>
+    <span class="chip">datasets: Tao-2023 WGS · Caggiano-2025 WGBS</span>
+    <span class="chip">updated 2026-07-08</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#idea">The idea</a>
+  <a href="#ref">The reference</a>
+  <a href="#dip">Method 1 · Coverage-dip</a>
+  <a href="#blockb">Method 2 · Block B</a>
+  <a href="#gloss">Glossary</a>
+  <a href="#metrics">How to read the numbers</a>
+  <a href="#results">Results so far</a>
+</nav>
+
+<section id="idea">
+  <h2><span class="num">00</span>The idea, and the biology under it</h2>
+  <p class="sub">Why a blood draw contains a record of which tissues are dying.</p>
+  <p class="col">Cell-free DNA (cfDNA) is DNA shed into blood by dying cells. When a cell dies, nucleases
+    chew its genome down to the fragments that were <strong>wrapped around nucleosomes</strong> and thus
+    protected — so a cfDNA fragment is a footprint of where a nucleosome sat in the cell of origin.
+    Because nucleosome positioning differs by cell type, the pool of fragments carries a mixed signature
+    of <em>which cell types contributed</em>. Deconvolution is the inverse problem: given the mixture,
+    estimate the per-cell-type proportions.</p>
+  <p class="col">We read that signature two independent ways. They rely on different physics, fail in
+    different situations, and — when they agree — give real confidence.</p>
+  <div class="formula">
+<span class="c"># Signal 1 — where fragments are DEPLETED</span>
+open chromatin (active promoters/enhancers) has no nucleosome to protect it
+  &rarr; cfDNA <strong>coverage dips</strong> there &rarr; dip depth reports that cell type's accessibility
+<span class="c"># Signal 2 — the RHYTHM of fragments in gene bodies</span>
+transcribed genes have disordered nucleosome arrays; silent genes keep regular ones
+  &rarr; the <strong>~190&nbsp;bp periodicity</strong> of fragment protection reports transcription state
+  </div>
+</section>
+
+<section id="ref">
+  <h2><span class="num">01</span>The reference atlas</h2>
+  <p class="sub">What we compare the cfDNA against.</p>
+  <p class="col">Both methods score a sample against a reference of <strong>346 single-cell ATAC cell
+    types</strong> (adult subset = 244), each with a genome-wide <strong>chromatin accessibility</strong>
+    track. ATAC marks open chromatin, which is a proxy for what a cell type is doing. The reference is the
+    <em>only</em> place cell-type identity enters — the cfDNA feature is matched against each cell type's
+    accessibility to ask "does this sample look like it contains that cell type?"</p>
+  <p class="col">A known limitation, worth stating up front: ATAC only sees the <em>open</em> compartment
+    (~0.1–11% of the genome carries signal). That is well-matched to Signal 1 (which lives at open
+    regulatory elements) but is a proxy — not a direct nucleosome map — for Signal 2.</p>
+</section>
+
+<section id="dip">
+  <h2><span class="num">02</span>Method 1 — Coverage-dip composition deconvolution</h2>
+  <p class="sub">The workhorse. Turns fragment coverage into per-cell-type fractions.
+    <code>deconv_stream.py</code> · <code>griffin_grouped.py</code></p>
+
+  <div class="card">
+    <p class="kicker">The pipeline, end to end</p>
+    <h3>Coverage dip &rarr; simplex solve</h3>
+    <p style="margin-bottom:0">For each cell type we take its most cell-type-specific accessible sites
+      (its <em>markers</em>), measure how deep the cfDNA coverage dips there, and solve for the mix of
+      cell types whose combined marker-dips best reproduce what we observe.</p>
+    <div class="grid4">
+      <div><p class="lab">What it measures</p><p class="val">GC-corrected <strong>composite coverage dip</strong>
+        of cfDNA fragments at each cell type's marker sites. Deep dip = that cell type's regulatory regions
+        are open = it contributed.</p></div>
+      <div><p class="lab">How it solves</p><p class="val">Simplex-constrained least squares
+        <code>y = R·w</code>: weights <code>w &ge; 0</code>, sum to 1, plus an <em>unknown</em> component
+        for cell types not in the atlas. No ridge (l2 = 0), validated by spike-in recovery.</p></div>
+      <div><p class="lab">What you get</p><p class="val">Per-cell-type (or per-group) fractions,
+        a rolled-up <strong>hematopoietic mass</strong>, and <code>recon_r</code> = how well the fit
+        reproduces the observed dips.</p></div>
+      <div><p class="lab">When it works / fails</p><p class="val"><span class="tag ok">works</span>
+        whole-genome cfDNA at depth. <span class="tag no">fails</span> shallow or <em>targeted</em> panels
+        that don't cover the marker sites — the dip vanishes into noise.</p></div>
+    </div>
+  </div>
+
+  <p class="col">Two design details matter. <strong>Similarity grouping</strong> (<code>--merge-corr</code>):
+    many cell types have near-identical accessibility (all the T-cell subsets, say), which makes the math
+    unstable. We agglomeratively merge cell types whose signatures correlate above a threshold, so the
+    reference stays well-conditioned — fine where cell types are distinguishable, collapsed where they
+    aren't. <strong>GC correction</strong> reweights fragments so sequencing GC-bias doesn't masquerade as
+    biology.</p>
+</section>
+
+<section id="blockb">
+  <h2><span class="num">03</span>Method 2 — Block B: gene-body nucleosome phasing</h2>
+  <p class="sub">The genome-wide, depth-robust alternative. <code>genebody_wps.py</code></p>
+
+  <div class="card">
+    <p class="kicker">The pipeline, end to end</p>
+    <h3>Windowed Protection Score &rarr; FFT &rarr; tissue-of-origin</h3>
+    <p style="margin-bottom:0">Inside each gene body we measure the <em>rhythm</em> of nucleosome
+      protection, extract how strong that ~190&nbsp;bp rhythm is per gene, and correlate the whole
+      profile against each cell type's expression state.</p>
+    <div class="grid4">
+      <div><p class="lab">What it measures</p><p class="val">The <strong>periodicity of the Windowed
+        Protection Score (WPS)</strong> in gene bodies. A Fourier transform pulls out the power at the
+        nucleosome-repeat length; the per-gene ratio is <code>nratio</code>.</p></div>
+      <div><p class="lab">How it calls cell type</p><p class="val"><strong>Affinity</strong> = correlation
+        of the sample's per-gene phasing against each cell type's accessibility (z-scored across cell
+        types). Active genes phase weakly, so the contributing cell type correlates <em>negatively</em>.</p></div>
+      <div><p class="lab">What you get</p><p class="val">A <strong>spectral peak</strong> (QC: should sit
+        at ~190&nbsp;bp), per-gene <code>nratio</code>, and a ranked cell-type / lineage affinity profile.</p></div>
+      <div><p class="lab">When it works / fails</p><p class="val"><span class="tag ok">works</span>
+        genome-wide, robust to low or uneven depth — it ran where Method 1 couldn't.
+        <span class="tag no">weaker</span> as a fraction estimator; it ranks, it doesn't cleanly quantify.</p></div>
+    </div>
+  </div>
+
+  <p class="col">Why bother with a second method: it is <strong>genome-wide</strong>. Method 1 lives at the
+    ~0.1–11% of the genome ATAC can see; Block B reads every gene body, so it survives targeted panels and
+    shallow samples that starve the dip. On healthy plasma the two agree — both land on
+    <strong>hematopoietic</strong> — which is the cross-check that says the signal is real, not an artifact
+    of one feature.</p>
+</section>
+
+<section id="gloss">
+  <h2><span class="num">04</span>Glossary — every term in one place</h2>
+  <p class="sub">The vocabulary that shows up in the logs and figures.</p>
+  <dl class="gloss">
+    <div><dt>cfDNA</dt><dd>Cell-free DNA — fragments shed into blood by dying cells; a nucleosome footprint of the cell of origin.</dd></div>
+    <div><dt>coverage dip</dt><dd>Local drop in cfDNA fragment coverage over open chromatin (no nucleosome to protect the DNA). Depth of the dip encodes accessibility.<span class="why">The feature Method 1 deconvolves.</span></dd></div>
+    <div><dt>WPS</dt><dd>Windowed Protection Score — at each base, (fragments fully spanning a 120&nbsp;bp window) minus (fragments with an end inside it). High where a nucleosome sits, low in linkers.</dd></div>
+    <div><dt>nucleosome repeat (~190&nbsp;bp)</dt><dd>The spacing of the nucleosome array. Its signature appears as a spectral peak at ~185–200&nbsp;bp in the WPS Fourier transform.<span class="why">If this peak is absent, the sample has no usable phasing signal.</span></dd></div>
+    <div><dt>nratio</dt><dd>Per gene, nucleosome-band FFT power (period 150–250&nbsp;bp) &divide; broadband power. A depth-robust index of how strongly that gene's nucleosomes are phased.</dd></div>
+    <div><dt>affinity</dt><dd>Correlation of a sample's per-gene phasing against a cell type's z-scored accessibility. Most-negative = most source-like.<span class="why">How Block B ranks cell types.</span></dd></div>
+    <div><dt>z-scoring</dt><dd>Standardizing each gene's accessibility across cell types, so the shared "housekeeping" signal drops out and cell-type-specific differences drive the ranking.</dd></div>
+    <div><dt>merge-corr</dt><dd>Threshold for merging cell types with near-identical accessibility into one group, keeping the reference matrix well-conditioned.</dd></div>
+    <div><dt>simplex / unknown</dt><dd>The solver constrains weights to be non-negative and sum to 1 (a simplex). An extra <em>unknown</em> column absorbs cell types absent from the atlas so their mass doesn't distort the rest.</dd></div>
+    <div><dt>recon_r</dt><dd>Correlation between observed and reconstructed feature — the fit quality. <strong>Below ~0.6 the call is unreliable</strong> and is excluded.</dd></div>
+    <div><dt>hematopoietic mass</dt><dd>Summed weight of all blood/immune cell types. Healthy plasma is ~90%+ — the expected ground truth.</dd></div>
+    <div><dt>GC correction</dt><dd>Reweighting fragments by GC content so library/sequencing GC-bias isn't mistaken for a coverage difference.</dd></div>
+    <div><dt>trim compensation</dt><dd><code>--trim N</code> extends both fragment ends by N&nbsp;bp to undo upstream hard-trimming (e.g. bisulfite M-bias trimming), so fragment lengths are correct before filtering.</dd></div>
+    <div><dt>permutation null</dt><dd>Re-running a classifier on shuffled labels many times to see what AUC chance produces. An AUC is only real if it clears this null.</dd></div>
+  </dl>
+</section>
+
+<section id="metrics">
+  <h2><span class="num">05</span>How to read the numbers</h2>
+  <p class="sub">The metrics that decide whether a result means anything.</p>
+  <div class="twrap">
+  <table>
+    <thead><tr><th>Metric</th><th>Range</th><th>What it tells you</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">recon_r</td><td class="mono">0 – 1</td><td>Fit quality of a dip deconvolution. &ge;0.8 solid; 0.6–0.8 usable; <span style="color:var(--warm)">&lt;0.6 discard</span>.</td></tr>
+      <tr><td class="mono">heme_mass</td><td class="mono">0 – 1</td><td>Fraction assigned to blood/immune. ~0.9+ on healthy plasma = correct.</td></tr>
+      <tr><td class="mono">spectral peak</td><td class="mono">bp</td><td>Where the WPS periodicity peaks. ~185–200&nbsp;bp = healthy nucleosome signal present.</td></tr>
+      <tr><td class="mono">nratio</td><td class="mono">~1 – 5</td><td>Per-gene phasing strength. Higher in silent genes; used as the Block-B feature, not read alone.</td></tr>
+      <tr><td class="mono">affinity</td><td class="mono">−0.05 – +0.05</td><td>Cell-type source-likeness. Small by nature; power comes from ranking over ~17k genes.</td></tr>
+      <tr><td class="mono">AUC</td><td class="mono">0.5 – 1</td><td>Classifier separation. Only meaningful <em>vs</em> the permutation null — 0.5 ± null-width = chance.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="results">
+  <h2><span class="num">06</span>Results so far</h2>
+  <p class="sub">What each dataset told us, honestly.</p>
+  <div class="twrap">
+  <table>
+    <thead><tr><th>Dataset / assay</th><th>Method</th><th>Outcome</th><th>Number</th></tr></thead>
+    <tbody>
+      <tr><td>Tao-2023 · plasma WGS<br><span style="color:var(--muted);font-size:13px">86 samples (NC/CRC/STAD)</span></td>
+        <td>Coverage-dip composition</td>
+        <td><span class="tag ok">works</span> healthy → hematopoietic, per-sample, reproducible</td>
+        <td class="mono">NC-10: 96% heme<br>recon 0.89</td></tr>
+      <tr><td>Tao-2023 · plasma WGS</td>
+        <td>Both methods, cross-check</td>
+        <td><span class="tag ok">agree</span> block-B tissue-of-origin recovers immune independently</td>
+        <td class="mono">top-15 all immune<br>p = 3.3e-5</td></tr>
+      <tr><td>Tao-2023 · plasma WGS</td>
+        <td>Cancer detection</td>
+        <td><span class="tag no">no signal</span> cancer reads as blood; ctDNA below detection</td>
+        <td class="mono">CRC median<br>100% heme</td></tr>
+      <tr><td>Caggiano-2025 · plasma WGBS<br><span style="color:var(--muted);font-size:13px">192 samples · targeted</span></td>
+        <td>Coverage-dip</td>
+        <td><span class="tag no">fails</span> targeted panel misses the markers</td>
+        <td class="mono">recon ≈ 0</td></tr>
+      <tr><td>Caggiano-2025 · plasma WGBS</td>
+        <td>Block B (ALS vs Control)</td>
+        <td><span class="tag ok">runs</span> correct blood-dominated composition, but <span class="tag no">no ALS signal</span></td>
+        <td class="mono">neural p = 0.72<br>AUC 0.498</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note key">
+    <p class="nl">The cross-check that matters</p>
+    On healthy plasma, the coverage-dip method and the nucleosome-phasing method — which share no
+    features and fail for different reasons — <strong>both land on hematopoietic</strong>. That agreement
+    is the strongest evidence the composition read-out is real.
+  </div>
+
+  <div class="note scope">
+    <p class="nl">Honest scope</p>
+    These methods resolve the <strong>dominant composition</strong> of a cfDNA sample (what is it mostly
+    made of — reliably, blood for healthy plasma). They do <strong>not</strong> detect a small
+    disease-specific fraction — circulating tumor DNA in cancer, or brain-derived cfDNA in ALS — which
+    sits below what a coarse nucleosome/accessibility read-out can see. For those, the matched signal is
+    <strong>methylation</strong> (present in the WGBS data, not yet used), which carries dense,
+    cell-type-specific marks per fragment.
+  </div>
+</section>
+
+<footer>
+  Methods reference for the cfDNA deconvolution work · code in <code>chrombpnet/cfdna/</code> ·
+  companion docs: <code>cfdna_deconv_report.md</code>, <code>blockB_results.md</code>,
+  <code>DESIGN_cfdna_tool.md</code>.
+</footer>
+
+</div>
+
+</body>
+</html>
