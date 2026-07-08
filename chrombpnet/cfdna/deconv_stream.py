@@ -68,11 +68,14 @@ def _open(path):
     return path
 
 
-def load_stream(path, cols, chroms, cumgc, sizes, rng):
+def load_stream(path, cols, chroms, cumgc, sizes, rng, trim=0):
     tb = pq.read_table(_open(path), columns=list(cols))
     ch = tb.column(cols[0]).to_numpy(zero_copy_only=False)
     s = tb.column(cols[1]).to_numpy().astype(np.int64)
     e = tb.column(cols[2]).to_numpy().astype(np.int64)
+    if trim:
+        s = s - trim
+        e = e + trim
     L = e - s
     keep = (L >= 100) & (L <= 250) & np.isin(ch, chroms)
     ch, s, e = ch[keep], s[keep], e[keep]
@@ -102,8 +105,8 @@ def load_stream(path, cols, chroms, cumgc, sizes, rng):
     return frby, len(sc)
 
 
-def deconvolve_one(path, ref, cols, chroms, cumgc, sizes, W, BIN, rng):
-    frby, nfr = load_stream(path, cols, chroms, cumgc, sizes, rng)
+def deconvolve_one(path, ref, cols, chroms, cumgc, sizes, W, BIN, rng, trim=0):
+    frby, nfr = load_stream(path, cols, chroms, cumgc, sizes, rng, trim=trim)
     if nfr == 0:
         raise ValueError("no fragments on target chroms — wrong genome build or chrom naming?")
     prof = region_profiles(frby, ref["regions"], W, BIN)
@@ -133,6 +136,8 @@ def main():
     ap.add_argument("--markers-per-group", type=int, default=400)
     ap.add_argument("--W", type=int, default=1000)
     ap.add_argument("--bin", type=int, default=10)
+    ap.add_argument("--trim", type=int, default=0,
+                    help="bp hard-trimmed from each fragment end upstream; compensated by extending both ends")
     a = ap.parse_args()
     os.makedirs(a.out_dir, exist_ok=True)
 
@@ -165,7 +170,7 @@ def main():
         else:
             t0 = time.time()
             try:
-                r = deconvolve_one(p, ref, a.cols, a.chroms, cumgc, sizes, a.W, a.bin, rng)
+                r = deconvolve_one(p, ref, a.cols, a.chroms, cumgc, sizes, a.W, a.bin, rng, trim=a.trim)
             except Exception as ex:
                 print(f"[{i+1}/{len(paths)}] {tag}: ERROR {type(ex).__name__} {ex}", flush=True); continue
             r["cfdna"] = tag

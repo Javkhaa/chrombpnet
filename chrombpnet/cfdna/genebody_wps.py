@@ -37,9 +37,11 @@ def load_genes(path, win):
     return genes
 
 
-def load_fragments(src, minlen, maxlen):
+def load_fragments(src, minlen, maxlen, trim=0):
     """Return (chrom, start, end) numpy arrays for fragments in [minlen, maxlen].
-    src is a local .parquet path or a gs:// URI (column-pruned streaming read)."""
+    src is a local .parquet path or a gs:// URI (column-pruned streaming read).
+    trim = bp hard-trimmed from EACH fragment end upstream; compensated here by
+    extending both ends (start-=trim, end+=trim) before the length filter."""
     import pyarrow.parquet as pq
     if src.startswith("gs://"):
         import pyarrow.fs as fs
@@ -51,6 +53,9 @@ def load_fragments(src, minlen, maxlen):
     ch = tb.column("chromosome").to_numpy(zero_copy_only=False)
     s = tb.column("start_position").to_numpy().astype(np.int64)
     e = tb.column("end_position").to_numpy().astype(np.int64)
+    if trim:
+        s = s - trim
+        e = e + trim
     L = e - s
     k = (L >= minlen) & (L <= maxlen)
     return ch[k], s[k], e[k]
@@ -93,10 +98,10 @@ def gene_wps(st, en, tss, win, half_k, maxlen):
 
 
 def extract(src, genes, win=4000, wps_k=120, minlen=120, maxlen=220,
-            nuc_lo=150, nuc_hi=250, broad_lo=50, broad_hi=500, detrend=601, verbose=True):
+            nuc_lo=150, nuc_hi=250, broad_lo=50, broad_hi=500, detrend=601, trim=0, verbose=True):
     """Returns dict: nratio, namp, gnames, Pmean, freqs, peak, used, nfrag."""
     t0 = time.time()
-    ch, s, e = load_fragments(src, minlen, maxlen)
+    ch, s, e = load_fragments(src, minlen, maxlen, trim=trim)
     nfrag = len(s)
     if verbose:
         print(f"  fragments {minlen}-{maxlen}bp: {nfrag:,} ({time.time()-t0:.0f}s)", flush=True)
@@ -151,11 +156,13 @@ def main():
     ap.add_argument("--wps-k", type=int, default=120)
     ap.add_argument("--minlen", type=int, default=120)
     ap.add_argument("--maxlen", type=int, default=220)
+    ap.add_argument("--trim", type=int, default=0,
+                    help="bp hard-trimmed from each fragment end upstream; compensated by extending both ends")
     args = ap.parse_args()
     genes = load_genes(args.genes, args.win)
     print(f"genes (>= {args.win}bp): {len(genes)}", flush=True)
     r = extract(args.cfdna, genes, win=args.win, wps_k=args.wps_k,
-                minlen=args.minlen, maxlen=args.maxlen)
+                minlen=args.minlen, maxlen=args.maxlen, trim=args.trim)
     np.savez(args.out, **r)
     print(f"saved {args.out}  peak={r['peak']:.1f}bp  median_nratio={np.median(r['nratio']):.3f}", flush=True)
 
