@@ -71,6 +71,31 @@ streamed column-pruned from GCS (chr/start/end only). Running in background (~2h
 Next: assemble sample x gene feature matrix, train T1 classifier (normal vs CRC vs STAD)
 with patient-disjoint CV, benchmark vs Nat Commun 2024 (CRC 84.7%).
 
+## T1 cancer classifier — NEGATIVE at this cohort/depth (2026-07-08)
+
+All 86 samples extracted (25 NC / 26 CRC / 35 STAD). Patient-disjoint 5-fold CV,
+three feature representations of block B:
+
+| Representation | CRC vs NC | STAD vs NC |
+|---|---|---|
+| 13-lineage cell-type affinity | 0.680 | 0.511 |
+| full 244-cell affinity (L1/L2) | 0.623 | 0.457 |
+| PCA-20 of raw per-gene nratio | 0.560 | 0.581 |
+| **permutation null (CRC-NC)** | **0.515 ± 0.121 (max 0.806)** | — |
+
+**Block B alone does not detect cancer here.** Richer representations are no better
+(lower), and the permutation null is so wide (±0.121; max shuffled AUC 0.806) that
+CRC-vs-NC 0.68 is ~1.4σ above chance — not significant. STAD is flat chance. Class-mean
+lineage affinities are near-identical across NC/CRC/STAD. Consistent with the earlier
+finding (CRC-32 -> ~100% blood): low ctDNA fraction at 0.28-3x WGS + n=86 is
+underpowered for fragmentation-only cancer detection. Nat Commun 2024's CRC 84.7% used
+744 subjects and stacked features — power and cohort size we don't have with block B alone.
+
+**Takeaway:** block B is a validated *composition / tissue-of-origin* feature (its real
+win), not a standalone cancer detector. Cancer detection needs the orthogonal global
+fragmentation blocks (C: fragment-length/DELFI, D: end-motifs) stacked on top, and/or
+higher-ctDNA samples. Diagnostic: `scratchpad/blockB_T1_diagnostic.py`.
+
 ## Reproduce
 
 ```
