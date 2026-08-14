@@ -1,16 +1,23 @@
 # Compiler outputs #
+# Directories #
+data
+data/
+# logs
 *.a
 *.bat
+*.egg-info/
 *.exe
-*.json
-*.pyc
 *.ipynb_checkpoints
-*.pkl
+*.json
 *.npy
-# Directories #
-# logs
-results
+*.pkl
+*.pyc
+.venv/
+__pycache__/
 experimental_scripts
-tracks
 needs_cleanup
 old
+results
+runs/
+tracks
+wandb/

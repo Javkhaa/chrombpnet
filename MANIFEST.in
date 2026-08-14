@@ -1,4 +1,3 @@
-include requirements.txt
 include workflows/*
 include tests/*
 include chrombpnet/data/*
