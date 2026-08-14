@@ -1,0 +1,1524 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Comprehensive findings, methods, and reproducibility report for the Prima Mente scATAC nucleosome modeling program.">
+  <title>Comprehensive scATAC Nucleosome Modeling Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18212a;
+      --muted: #5b6670;
+      --line: #d8dee4;
+      --paper: #ffffff;
+      --band: #f5f7f8;
+      --nav: #10242a;
+      --teal: #087f73;
+      --blue: #2563a8;
+      --amber: #a75a05;
+      --red: #b33a3a;
+      --green: #287a45;
+      --violet: #7055a7;
+      --soft-teal: #e6f5f2;
+      --soft-blue: #eaf2fb;
+      --soft-amber: #fff2df;
+      --soft-red: #fbeaea;
+      --soft-green: #eaf5ed;
+      --code: #eef1f3;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      letter-spacing: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      line-height: 1.55;
+    }
+
+    a {
+      color: #155fa0;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+    }
+
+    header {
+      background: var(--nav);
+      color: #f8fbfc;
+      border-bottom: 5px solid var(--teal);
+      padding: 42px 28px 34px;
+    }
+
+    .wrap {
+      width: min(1160px, 100%);
+      margin: 0 auto;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: #9fdcd3;
+      font-size: 13px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 980px;
+      margin: 0;
+      font-size: clamp(34px, 4.4vw, 54px);
+      line-height: 1.08;
+    }
+
+    .lede {
+      max-width: 900px;
+      margin: 17px 0 0;
+      color: #dbe7e9;
+      font-size: 18px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin-top: 24px;
+      color: #bcd0d4;
+      font-size: 13px;
+    }
+
+    .report-nav {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      overflow-x: auto;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, .97);
+      white-space: nowrap;
+    }
+
+    .report-nav .wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 9px 18px;
+    }
+
+    .report-nav a {
+      border-radius: 4px;
+      color: #33424d;
+      padding: 6px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .report-nav a:hover,
+    .report-nav a:focus-visible {
+      background: var(--soft-teal);
+      color: #075e56;
+    }
+
+    section {
+      border-bottom: 1px solid var(--line);
+      padding: 38px 28px 42px;
+      scroll-margin-top: 58px;
+    }
+
+    section:nth-of-type(even) {
+      background: var(--band);
+    }
+
+    h2 {
+      margin: 0 0 8px;
+      font-size: 27px;
+      line-height: 1.2;
+    }
+
+    h3 {
+      margin: 28px 0 10px;
+      font-size: 19px;
+      line-height: 1.25;
+    }
+
+    h4 {
+      margin: 18px 0 8px;
+      font-size: 15px;
+    }
+
+    p {
+      max-width: 1000px;
+      margin: 0 0 14px;
+    }
+
+    .section-intro {
+      max-width: 900px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .cols-4 {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      padding: 16px;
+    }
+
+    .metric {
+      min-height: 118px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      display: block;
+      margin-top: 8px;
+      font-size: 31px;
+      font-weight: 780;
+      line-height: 1;
+    }
+
+    .metric-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .evidence {
+      display: inline-block;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 11px;
+      font-weight: 780;
+      text-transform: uppercase;
+      vertical-align: 1px;
+    }
+
+    .evidence-established {
+      background: var(--soft-green);
+      color: var(--green);
+    }
+
+    .evidence-encouraging {
+      background: var(--soft-amber);
+      color: var(--amber);
+    }
+
+    .evidence-open {
+      background: var(--soft-blue);
+      color: var(--blue);
+    }
+
+    .callout {
+      max-width: 1030px;
+      margin: 20px 0;
+      border-left: 5px solid var(--teal);
+      background: var(--soft-teal);
+      padding: 15px 17px;
+    }
+
+    .callout.warning {
+      border-color: var(--amber);
+      background: var(--soft-amber);
+    }
+
+    .callout.critical {
+      border-color: var(--red);
+      background: var(--soft-red);
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    figure {
+      max-width: 1060px;
+      margin: 22px 0 26px;
+      break-inside: avoid;
+    }
+
+    .plot {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      padding: 16px;
+      overflow-x: auto;
+    }
+
+    .plot svg {
+      display: block;
+      width: 100%;
+      min-width: 620px;
+      height: auto;
+    }
+
+    figcaption {
+      margin-top: 9px;
+      color: #43515c;
+      font-size: 13px;
+    }
+
+    .plot-title {
+      margin: 0 0 3px;
+      font-size: 16px;
+      font-weight: 760;
+    }
+
+    .plot-subtitle {
+      margin: 0 0 13px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .plot-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .swatch {
+      display: inline-block;
+      width: 13px;
+      height: 4px;
+      margin-right: 5px;
+      vertical-align: 3px;
+    }
+
+    .finding {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      margin: 12px 0 24px;
+    }
+
+    .finding > div {
+      min-width: 0;
+      padding: 13px 14px;
+      border-right: 1px solid var(--line);
+    }
+
+    .finding > div:last-child {
+      border-right: 0;
+    }
+
+    .finding dt {
+      margin: 0 0 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 780;
+      text-transform: uppercase;
+    }
+
+    .finding dd {
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .table-wrap {
+      max-width: 1100px;
+      overflow-x: auto;
+      margin: 14px 0 22px;
+    }
+
+    table {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-collapse: collapse;
+      background: #fff;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 11px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+    }
+
+    th {
+      background: #edf1f3;
+      color: #33424d;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    tr.selected td {
+      background: var(--soft-green);
+      font-weight: 700;
+    }
+
+    code {
+      border: 1px solid #dce2e6;
+      border-radius: 4px;
+      background: var(--code);
+      padding: 1px 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .9em;
+      overflow-wrap: anywhere;
+    }
+
+    pre.command {
+      max-width: 1100px;
+      overflow-x: auto;
+      border: 1px solid #35454e;
+      border-radius: 7px;
+      background: #17242a;
+      color: #eef6f7;
+      padding: 15px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+
+    .method-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: 1.15fr 34px 1fr 34px 1.1fr;
+      align-items: stretch;
+      gap: 8px;
+      margin: 20px 0;
+    }
+
+    .pipeline .node {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      padding: 15px;
+    }
+
+    .pipeline .arrow {
+      align-self: center;
+      color: var(--teal);
+      font-size: 26px;
+      text-align: center;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .roadmap {
+      counter-reset: stage;
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .roadmap-item {
+      counter-increment: stage;
+      display: grid;
+      grid-template-columns: 42px 1fr 1fr;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+    }
+
+    .roadmap-item::before {
+      content: counter(stage);
+      display: grid;
+      place-items: center;
+      background: var(--nav);
+      color: #fff;
+      font-weight: 780;
+    }
+
+    .roadmap-item > div {
+      padding: 13px 14px;
+      border-right: 1px solid var(--line);
+    }
+
+    .roadmap-item > div:last-child {
+      border-right: 0;
+    }
+
+    .roadmap-item strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .roadmap-item span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .bar-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 155px minmax(180px, 1fr) 70px;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+
+    .bar-track {
+      height: 18px;
+      border-radius: 3px;
+      background: #e7ebee;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      background: var(--blue);
+    }
+
+    .bar-fill.teal { background: var(--teal); }
+    .bar-fill.amber { background: var(--amber); }
+    .bar-fill.red { background: var(--red); }
+    .bar-fill.green { background: var(--green); }
+    .bar-fill.violet { background: var(--violet); }
+
+    .refs {
+      display: grid;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .glossary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 24px;
+    }
+
+    .glossary div {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 0;
+    }
+
+    .glossary dt {
+      font-weight: 760;
+    }
+
+    .glossary dd {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    footer {
+      background: #f1f4f5;
+      color: var(--muted);
+      padding: 24px 28px 34px;
+      font-size: 12px;
+    }
+
+    @media (max-width: 900px) {
+      .cols-3,
+      .cols-4,
+      .finding,
+      .glossary {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .finding > div:nth-child(2) {
+        border-right: 0;
+      }
+
+      .finding > div:nth-child(-n+2) {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .pipeline {
+        grid-template-columns: 1fr;
+      }
+
+      .pipeline .arrow {
+        transform: rotate(90deg);
+      }
+
+      .roadmap-item {
+        grid-template-columns: 38px 1fr;
+      }
+
+      .roadmap-item > div:last-child {
+        grid-column: 2;
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 620px) {
+      header,
+      section {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .cols-2,
+      .cols-3,
+      .cols-4,
+      .finding,
+      .glossary {
+        grid-template-columns: 1fr;
+      }
+
+      .finding > div {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .finding > div:last-child {
+        border-bottom: 0;
+      }
+
+      .bar-row {
+        grid-template-columns: 110px minmax(120px, 1fr) 58px;
+      }
+    }
+
+    @media print {
+      .report-nav {
+        display: none;
+      }
+
+      body {
+        color: #000;
+      }
+
+      header {
+        background: #fff;
+        color: #000;
+        border-bottom: 2px solid #000;
+      }
+
+      .eyebrow,
+      .lede,
+      .meta {
+        color: #333;
+      }
+
+      section {
+        background: #fff !important;
+        break-before: auto;
+      }
+
+      figure,
+      table,
+      .card,
+      .finding,
+      .roadmap-item,
+      pre {
+        break-inside: avoid;
+      }
+
+      a {
+        color: #000;
+        text-decoration: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <p class="eyebrow">Prima Mente / ChromBPNet nucleosome program</p>
+      <h1>Comprehensive scATAC nucleosome modeling report</h1>
+      <p class="lede">
+        Existing findings, quantitative analyses, methods, limitations, and the decision path from
+        a sequence-derived cfDNA nucleosome prior to the current GM12878 PyTorch accessibility +
+        nucleosome-dyad benchmark.
+      </p>
+      <div class="meta">
+        <span>Report date: 2026-08-14</span>
+        <span>Owner: Jay / Prima Mente</span>
+        <span>Branch: nucleosome-head</span>
+        <span>Current benchmark: Pierce2021 GM12878</span>
+        <span>Evaluation: held-out chr1, chr3, chr6</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="report-nav" aria-label="Report contents">
+    <div class="wrap">
+      <a href="#executive-summary">Summary</a>
+      <a href="#project-arc">Project arc</a>
+      <a href="#data">Data</a>
+      <a href="#labels">Labels</a>
+      <a href="#model">Model</a>
+      <a href="#training">Training</a>
+      <a href="#evaluation">Evaluation</a>
+      <a href="#multicell">Multicell</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#appendix">Appendix</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="executive-summary">
+      <div class="wrap">
+        <h2>Executive Summary</h2>
+        <p class="section-intro">
+          The project is testing whether sequence can support a shared model of chromatin
+          accessibility and nucleosome positioning while preserving the cell-type-specific
+          nucleosome occupancy that a universal GM12878 label would erase.
+        </p>
+
+        <div class="grid cols-4">
+          <div class="card metric">
+            <span class="metric-label">Corpus inventoried</span>
+            <strong class="metric-value">724.6 GiB</strong>
+            <div class="metric-note">68 pseudobulk samples in 26 studies</div>
+          </div>
+          <div class="card metric">
+            <span class="metric-label">Insert-length viable</span>
+            <strong class="metric-value">23/26</strong>
+            <div class="metric-note">studies pass the nucleosome-label gate</div>
+          </div>
+          <div class="card metric">
+            <span class="metric-label">Best validation loss</span>
+            <strong class="metric-value">1367.52</strong>
+            <div class="metric-note">epoch 7, step 18,942</div>
+          </div>
+          <div class="card metric">
+            <span class="metric-label">Held-out AUROC</span>
+            <strong class="metric-value">0.8467</strong>
+            <div class="metric-note">peak versus nonpeak, accessibility count</div>
+          </div>
+        </div>
+
+        <div class="callout">
+          <p><span class="evidence evidence-established">Established</span></p>
+          <p>
+            The end-to-end PyTorch path works: cell-type-specific accessibility and dyad labels are
+            built, a two-head model trains from sequence, the best checkpoint is selected by held-out
+            validation loss, and test evaluation runs on chromosomes excluded from training.
+          </p>
+        </div>
+
+        <div class="grid cols-3">
+          <div class="card">
+            <h3>Accessibility</h3>
+            <p><strong>Healthy baseline.</strong> Count Pearson is 0.6179, profile Pearson is 0.4867,
+              and profile JSD improves from a flat 0.6438 to 0.4512.</p>
+            <span class="evidence evidence-established">Established</span>
+          </div>
+          <div class="card">
+            <h3>Nucleosome counts</h3>
+            <p><strong>Promising.</strong> Count Pearson is 0.5990 and Spearman is 0.5028 on held-out
+              peaks, close to the accessibility count performance.</p>
+            <span class="evidence evidence-encouraging">Encouraging</span>
+          </div>
+          <div class="card">
+            <h3>Nucleosome profiles</h3>
+            <p><strong>Main weakness.</strong> JSD beats flat, but profile Pearson is only 0.1851.
+              Shape prediction is the next optimization target.</p>
+            <span class="evidence evidence-encouraging">Encouraging</span>
+          </div>
+        </div>
+
+        <h3>Decision now</h3>
+        <p>
+          Do not scale directly from one GM12878 run to all 68 corpus samples. First export predicted
+          tracks and inspect biological loci, train matched K562 and MCF7 baselines with their own
+          labels, and strengthen nucleosome profile shape through label smoothing, loss weighting,
+          and head-capacity experiments. Then compare cell types under shared chromosome holdouts and
+          deviation-aware metrics.
+        </p>
+
+        <div class="table-wrap">
+          <table aria-label="Project status board">
+            <thead><tr><th>Workstream</th><th>Status</th><th>Evidence</th><th>Next decision</th></tr></thead>
+            <tbody>
+              <tr><td>Corpus and storage</td><td>Complete</td><td>724.6 GiB inventoried; NFS-backed data root</td><td>Process samples per manifest, not all at once</td></tr>
+              <tr><td>Cell-type labels</td><td>Complete for Pierce2021 cell lines</td><td>GM12878, K562, MCF7 dyad and cutsite tracks</td><td>Keep labels cell-type-specific</td></tr>
+              <tr><td>Single-cell-type PyTorch model</td><td>Complete baseline</td><td>GM12878 training and held-out test evaluation</td><td>Improve nucleosome profile shape</td></tr>
+              <tr><td>Cross-cell-type benchmark</td><td>Not yet measured</td><td>K562/MCF7 dyad tracks exist; accessibility bigWigs were not found in the current data tree</td><td>Rebuild or locate accessibility tracks, then run matched baselines</td></tr>
+              <tr><td>Generalization to unseen cell types</td><td>Open</td><td>No cell-type holdout result yet</td><td>Reserve entire lineages in later corpus experiments</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="project-arc">
+      <div class="wrap">
+        <h2>Scientific Project Arc</h2>
+        <p class="section-intro">
+          The current scATAC model is not an isolated experiment. It follows a sequence of tests that
+          separated nucleosome positioning from cleavage bias, exposed the limits of plasma-only
+          conditioning, and motivated cell-type-resolved scATAC labels.
+        </p>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 1. Evidence accumulated in stages</p>
+            <p class="plot-subtitle">Each stage answered a narrower question and exposed the next limitation.</p>
+            <svg viewBox="0 0 980 260" role="img" aria-label="Timeline from cfDNA nucleosome prior through bias ablation, cell conditioning, scATAC label construction, and GM12878 held-out evaluation">
+              <line x1="90" y1="92" x2="890" y2="92" stroke="#9aa7b0" stroke-width="4"/>
+              <g font-family="system-ui, sans-serif">
+                <circle cx="100" cy="92" r="15" fill="#087f73"/><text x="100" y="97" text-anchor="middle" fill="white" font-size="13" font-weight="700">1</text>
+                <text x="100" y="132" text-anchor="middle" font-size="14" font-weight="700">cfDNA prior</text>
+                <text x="100" y="152" text-anchor="middle" font-size="12" fill="#5b6670">profile r ~0.68</text>
+                <text x="100" y="169" text-anchor="middle" font-size="12" fill="#5b6670">NRL recovered</text>
+
+                <circle cx="300" cy="92" r="15" fill="#2563a8"/><text x="300" y="97" text-anchor="middle" fill="white" font-size="13" font-weight="700">2</text>
+                <text x="300" y="132" text-anchor="middle" font-size="14" font-weight="700">Bias ablation</text>
+                <text x="300" y="152" text-anchor="middle" font-size="12" fill="#5b6670">4-mer floor 0.213</text>
+                <text x="300" y="169" text-anchor="middle" font-size="12" fill="#5b6670">L8 0.674</text>
+
+                <circle cx="500" cy="92" r="15" fill="#a75a05"/><text x="500" y="97" text-anchor="middle" fill="white" font-size="13" font-weight="700">3</text>
+                <text x="500" y="132" text-anchor="middle" font-size="14" font-weight="700">Conditioning</text>
+                <text x="500" y="152" text-anchor="middle" font-size="12" fill="#5b6670">machinery works</text>
+                <text x="500" y="169" text-anchor="middle" font-size="12" fill="#5b6670">contrast insufficient</text>
+
+                <circle cx="700" cy="92" r="15" fill="#7055a7"/><text x="700" y="97" text-anchor="middle" fill="white" font-size="13" font-weight="700">4</text>
+                <text x="700" y="132" text-anchor="middle" font-size="14" font-weight="700">scATAC labels</text>
+                <text x="700" y="152" text-anchor="middle" font-size="12" fill="#5b6670">cell-type dyads</text>
+                <text x="700" y="169" text-anchor="middle" font-size="12" fill="#5b6670">23/26 viable</text>
+
+                <circle cx="890" cy="92" r="15" fill="#287a45"/><text x="890" y="97" text-anchor="middle" fill="white" font-size="13" font-weight="700">5</text>
+                <text x="890" y="132" text-anchor="middle" font-size="14" font-weight="700">GM12878</text>
+                <text x="890" y="152" text-anchor="middle" font-size="12" fill="#5b6670">two-head PyTorch</text>
+                <text x="890" y="169" text-anchor="middle" font-size="12" fill="#5b6670">held-out eval</text>
+              </g>
+            </svg>
+          </div>
+          <figcaption>The project moved from a global sequence prior toward the harder target: cell-type-specific positioning.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Why move from cfDNA to scATAC?</dd></div>
+          <div><dt>Observed result</dt><dd>Sequence predicts a global positioning prior, while healthy plasma offers weak lineage contrast.</dd></div>
+          <div><dt>Interpretation</dt><dd>scATAC fragment geometry supplies direct cell-type-resolved dyad labels.</dd></div>
+          <div><dt>Limitation</dt><dd>scATAC labels still require depth, insert preservation, and orthogonal validation.</dd></div>
+        </div>
+
+        <h3>Phase 1: sequence carries a nucleosome-positioning prior</h3>
+        <p>
+          A single-head dilated convolutional model trained on pooled healthy-plasma cfDNA endpoint
+          density reached approximately <strong>0.679 held-out profile correlation</strong> and
+          <strong>0.624 count correlation</strong> on test chromosomes chr1 and chr9. Predictions
+          recovered the approximately 190 bp nucleosome repeat, with the FFT maximum appearing in
+          the 200 bp bin. This is important because a base-composition shortcut should not reproduce
+          multi-nucleosome periodicity on chromosomes excluded from training.
+        </p>
+        <p><span class="evidence evidence-established">Established</span> Sequence contains a reproducible, cell-type-invariant positioning component.</p>
+
+        <h3>Phase 2: positioning is not merely nuclease end-motif bias</h3>
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 2. Receptive-field ablation versus the 4-mer cleavage-bias floor</p>
+            <p class="plot-subtitle">Held-out profile correlation; higher is better.</p>
+            <svg viewBox="0 0 820 300" role="img" aria-label="Horizontal bars showing profile correlation 0.213 for the 4-mer floor, 0.632 for L1, 0.634 for L2, 0.638 for L4, and 0.674 for L8">
+              <g font-family="system-ui, sans-serif" font-size="12">
+                <line x1="170" y1="250" x2="750" y2="250" stroke="#aab4bb"/>
+                <g fill="#5b6670"><text x="170" y="272">0.0</text><text x="336" y="272">0.2</text><text x="502" y="272">0.4</text><text x="668" y="272">0.6</text></g>
+                <g stroke="#e1e6e9"><line x1="336" y1="30" x2="336" y2="250"/><line x1="502" y1="30" x2="502" y2="250"/><line x1="668" y1="30" x2="668" y2="250"/></g>
+                <text x="155" y="57" text-anchor="end" font-weight="700">4-mer floor</text><rect x="170" y="40" width="177" height="25" fill="#b33a3a"/><text x="356" y="57" font-weight="700">0.213</text>
+                <text x="155" y="100" text-anchor="end" font-weight="700">L1 (~100 bp)</text><rect x="170" y="83" width="524" height="25" fill="#2563a8"/><text x="703" y="100" font-weight="700">0.632</text>
+                <text x="155" y="143" text-anchor="end" font-weight="700">L2 (~130 bp)</text><rect x="170" y="126" width="525" height="25" fill="#2563a8"/><text x="704" y="143" font-weight="700">0.634</text>
+                <text x="155" y="186" text-anchor="end" font-weight="700">L4 (~250 bp)</text><rect x="170" y="169" width="529" height="25" fill="#087f73"/><text x="708" y="186" font-weight="700">0.638</text>
+                <text x="155" y="229" text-anchor="end" font-weight="700">L8 (~1 kb)</text><rect x="170" y="212" width="558" height="25" fill="#287a45"/><text x="737" y="229" font-weight="700">0.674</text>
+                <path d="M347 27 L728 27" stroke="#a75a05" stroke-width="2"/><path d="M347 22 L347 32 M728 22 L728 32" stroke="#a75a05" stroke-width="2"/><text x="537" y="18" text-anchor="middle" fill="#8a4b06" font-weight="700">+0.461 beyond 4-mer floor</text>
+              </g>
+            </svg>
+          </div>
+          <figcaption>Most predictive signal appears within roughly one nucleosome of sequence context; longer context adds a smaller phasing gain.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Could local nuclease sequence preference explain the profile result?</dd></div>
+          <div><dt>Observed result</dt><dd>The pure 4-mer floor reaches 0.213; L8 reaches 0.674.</dd></div>
+          <div><dt>Interpretation</dt><dd>The +0.461 gap is positioning signal beyond local cleavage preference.</dd></div>
+          <div><dt>Limitation</dt><dd>This ablation separates bias from positioning, not shared from cell-type-specific positioning.</dd></div>
+        </div>
+
+        <h3>Phase 3: conditioning infrastructure was valid, but the biological contrast was not</h3>
+        <p>
+          Identity-initialized FiLM conditioning was implemented and verified to start with identical
+          outputs across conditions. However, BH01 and IH01 are both healthy plasma dominated by
+          hematopoietic cfDNA. Differences between them primarily test sample or technical variation,
+          not distinct cell-type nucleosome landscapes. The honest phase-3 result was therefore an
+          architecture deliverable, not a claim of cell-type biology.
+        </p>
+        <div class="callout warning">
+          <p><span class="evidence evidence-open">Open</span></p>
+          <p>A model can predict the invariant backbone well and still learn no cell-type residual. Absolute profile correlation alone cannot establish conditioning success.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="data">
+      <div class="wrap">
+        <h2>Dataset Landscape</h2>
+        <p class="section-intro">
+          The Human scATAC Corpus provides broad biological coverage in a uniform fragment format,
+          but sequencing depth, lineage balance, and preservation of original insert lengths vary.
+        </p>
+
+        <div class="grid cols-4">
+          <div class="card metric"><span class="metric-label">Compressed volume</span><strong class="metric-value">724.6 GiB</strong><div class="metric-note">source tarball bytes</div></div>
+          <div class="card metric"><span class="metric-label">Pseudobulks</span><strong class="metric-value">68</strong><div class="metric-note">cell-line and tissue samples</div></div>
+          <div class="card metric"><span class="metric-label">Studies</span><strong class="metric-value">26</strong><div class="metric-note">one standardized archive per sample</div></div>
+          <div class="card metric"><span class="metric-label">Currently trained</span><strong class="metric-value">1/68</strong><div class="metric-note">GM12878 only</div></div>
+        </div>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 3. Insert-length preservation gate</p>
+            <p class="plot-subtitle">Studies viable for nucleosome dyad construction.</p>
+            <svg viewBox="0 0 900 210" role="img" aria-label="Stacked bar showing 23 of 26 studies pass insert-length preservation and 3 fail">
+              <g font-family="system-ui, sans-serif">
+                <rect x="90" y="65" width="708" height="55" rx="3" fill="#287a45"/>
+                <rect x="798" y="65" width="92" height="55" rx="3" fill="#b33a3a"/>
+                <text x="444" y="99" text-anchor="middle" fill="white" font-size="19" font-weight="750">23 PASS (88.5%)</text>
+                <text x="844" y="99" text-anchor="middle" fill="white" font-size="16" font-weight="750">3 FAIL</text>
+                <text x="90" y="151" font-size="13" fill="#5b6670">PASS: insert distribution preserves sub-, mono-, and di-nucleosomal structure</text>
+                <text x="90" y="174" font-size="13" fill="#5b6670">FAIL: Buenrostro2018 76 bp; Li2023a 101 bp; Liscovitch-Brauer2021 176 bp fixed-length collapse</text>
+              </g>
+            </svg>
+          </div>
+          <figcaption>Insert preservation is a property of each processing pipeline, not simply the assay class.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Can most corpus fragments support a dyad label?</dd></div>
+          <div><dt>Observed result</dt><dd>23 of 26 studies preserve nucleosome-scale insert structure.</dd></div>
+          <div><dt>Interpretation</dt><dd>The corpus is broadly usable after per-study gating.</dd></div>
+          <div><dt>Limitation</dt><dd>The original checker had an adjacent-bin blind spot; hardened fixed-length checks are required.</dd></div>
+        </div>
+
+        <h3>Corpus scale is highly uneven</h3>
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 4. Selected study volumes</p>
+            <p class="plot-subtitle">Compressed GiB; archive size is a sequencing-depth proxy, not a biological-quality score.</p>
+            <div class="bar-list" role="img" aria-label="Selected study sizes: Camiel2023 296.3 GiB, Domcke2020 91.6, Li2023a 75.8, Terekhanova2023 49.0, Liang2023 29.0, Kanemaru2023 21.9, Pierce2021 10.3">
+              <div class="bar-row"><strong>Camiel2023</strong><div class="bar-track"><div class="bar-fill teal" style="width:100%"></div></div><span>296.3</span></div>
+              <div class="bar-row"><strong>Domcke2020</strong><div class="bar-track"><div class="bar-fill" style="width:30.9%"></div></div><span>91.6</span></div>
+              <div class="bar-row"><strong>Li2023a</strong><div class="bar-track"><div class="bar-fill red" style="width:25.6%"></div></div><span>75.8</span></div>
+              <div class="bar-row"><strong>Terekhanova2023</strong><div class="bar-track"><div class="bar-fill violet" style="width:16.5%"></div></div><span>49.0</span></div>
+              <div class="bar-row"><strong>Liang2023</strong><div class="bar-track"><div class="bar-fill green" style="width:9.8%"></div></div><span>29.0</span></div>
+              <div class="bar-row"><strong>Kanemaru2023</strong><div class="bar-track"><div class="bar-fill amber" style="width:7.4%"></div></div><span>21.9</span></div>
+              <div class="bar-row"><strong>Pierce2021</strong><div class="bar-track"><div class="bar-fill" style="width:3.5%"></div></div><span>10.3</span></div>
+            </div>
+          </div>
+          <figcaption>Camiel2023 alone is roughly 41% of the compressed corpus and should be processed late or downsampled.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Should the full corpus be staged and processed together?</dd></div>
+          <div><dt>Observed result</dt><dd>Volume is dominated by one 296.3 GiB brain atlas; 19 samples are below 1 GiB.</dd></div>
+          <div><dt>Interpretation</dt><dd>Process per sample, retain compact tracks and peaks, and defer the largest atlas.</dd></div>
+          <div><dt>Limitation</dt><dd>Compressed size approximates depth but does not replace fragment count, FRiP, or TSS enrichment QC.</dd></div>
+        </div>
+
+        <h3>Why Pierce2021 is the controlled starting point</h3>
+        <div class="table-wrap">
+          <table aria-label="Pierce2021 insert-size diagnostics">
+            <thead><tr><th>Dataset</th><th>Median insert</th><th>Mode</th><th>Sub-100 bp</th><th>Mono</th><th>Di</th><th>Verdict</th></tr></thead>
+            <tbody>
+              <tr><td>Pierce2021 GM12878</td><td>177 bp</td><td>168 bp (0.7%)</td><td>27%</td><td>42%</td><td>12%</td><td><span class="evidence evidence-established">Pass</span></td></tr>
+              <tr><td>Pierce2021 K562</td><td>185 bp</td><td>168 bp (0.6%)</td><td>27%</td><td>41%</td><td>15%</td><td><span class="evidence evidence-established">Pass</span></td></tr>
+              <tr><td>Liscovitch-Brauer2021 K562</td><td>176 bp</td><td>175/176 bp (~99.7%)</td><td>0%</td><td>100%</td><td>0%</td><td><span class="evidence evidence-open">Exclude</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Pierce2021 provides GM12878, K562, and MCF7 under one droplet protocol and all three pass
+          the insert-length gate. K562 fragments from Liscovitch-Brauer2021 must not be mixed into the
+          Pierce pseudobulk because their insert lengths collapsed during processing.
+        </p>
+
+        <h3>Lineage-aware expansion</h3>
+        <p>
+          Blood/immune and brain lineages are already overrepresented. The first broad expansion
+          should maximize regulatory diversity per processed byte: deep heart, kidney, retina,
+          tractable brain, liver, lung, ovary or pituitary, and one tumor state. Low-depth samples
+          should enter only after usable-fragment, TSS-enrichment, FRiP, and peak-count checks.
+        </p>
+      </div>
+    </section>
+
+    <section id="labels">
+      <div class="wrap">
+        <h2>Cell-Type-Specific Label Construction</h2>
+        <p class="section-intro">
+          Different cell types have different nucleosome occupancy. The dyad target is therefore
+          constructed separately from each cell type's fragments; GM12878 is a benchmark, not a
+          universal nucleosome label.
+        </p>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 5. Fragment-to-model data flow</p>
+            <p class="plot-subtitle">One fragment source produces linked, cell-type-matched targets.</p>
+            <div class="pipeline" role="img" aria-label="Fragments flow into accessibility cutsites and nucleosome dyads, then peaks and nonpeaks, then sequence plus two bigWig targets, then a shared trunk and two output heads">
+              <div class="node"><strong>Standardized fragments</strong><span>hg38; chr, start, end, barcode, count</span></div>
+              <div class="arrow" aria-hidden="true">&#8594;</div>
+              <div class="node"><strong>Label generation</strong><span>+4/-4 cutsites<br>150-249 bp fragment centers<br>main chromosomes only</span></div>
+              <div class="arrow" aria-hidden="true">&#8594;</div>
+              <div class="node"><strong>Training example</strong><span>2,114 bp sequence<br>1,000 bp cutsite profile/count<br>1,000 bp dyad profile/count</span></div>
+            </div>
+            <div class="pipeline" aria-hidden="true">
+              <div class="node"><strong>MACS3 + nonpeaks</strong><span>accessibility peaks and GC-matched background</span></div>
+              <div class="arrow">&#8594;</div>
+              <div class="node"><strong>Shared PyTorch trunk</strong><span>sequence grammar and residual dilated context</span></div>
+              <div class="arrow">&#8594;</div>
+              <div class="node"><strong>Two heads</strong><span>accessibility profile/count<br>nucleosome profile/count</span></div>
+            </div>
+          </div>
+          <figcaption>The labels share source fragments and genomic windows, but represent different biological projections of those fragments.</figcaption>
+        </figure>
+
+        <div class="grid cols-2">
+          <div class="card">
+            <h3>Head 1: accessibility cutsites</h3>
+            <p>For each fragment, add its multiplicity at the shifted 5-prime cut positions:</p>
+            <p><code>plus = start + 4</code><br><code>minus = end - 4 - 1</code></p>
+            <p class="method-note">This follows the ChromBPNet Tn5 convention. Do not apply a second shift downstream.</p>
+          </div>
+          <div class="card">
+            <h3>Head 2: nucleosome dyads</h3>
+            <p>Keep mono-nucleosomal fragments with default insert length <code>150 &lt;= L &lt; 250</code> and add multiplicity at:</p>
+            <p><code>dyad = floor((start + end) / 2)</code></p>
+            <p class="method-note">Optional Gaussian smoothing materializes dense chromosome arrays; unsmoothed aggregation stays sparse.</p>
+          </div>
+        </div>
+
+        <h3>Implementation and storage</h3>
+        <p>
+          <code>chrombpnet-build-tracks</code> uses Polars lazy scans and streaming group-by
+          aggregation to avoid whole-genome dense arrays for ordinary track construction. It filters
+          to chr1-22, X, and Y by default and writes base-resolution bigWigs with pyBigWig. Large
+          artifacts live below <code>/mnt/data/jganbat/chrombpnet/data</code>; the repository's
+          <code>data</code> path is a symlink to that NFS-backed directory.
+        </p>
+
+        <div class="table-wrap">
+          <table aria-label="Current label artifacts">
+            <thead><tr><th>Cell type</th><th>Accessibility label</th><th>Nucleosome label</th><th>Training status</th></tr></thead>
+            <tbody>
+              <tr><td>GM12878</td><td><code>data/GM12878.accessibility_cutsite.bw</code></td><td><code>data/GM12878.nucleosome_dyad.bw</code></td><td>Full baseline complete</td></tr>
+              <tr><td>K562</td><td>Not found in current data tree</td><td><code>data/K562.nucleosome_dyad.bw</code></td><td>Build or locate accessibility track, then train</td></tr>
+              <tr><td>MCF7</td><td>Not found in current data tree</td><td><code>data/MCF7.nucleosome_dyad.bw</code></td><td>Build or locate accessibility track, then train</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout warning">
+          <p><strong>Remaining preprocessing risk.</strong> ENCODE hg38 blacklist subtraction is not yet fully wired into the owned multitask path. It should be added before corpus-scale comparison, together with per-sample depth, TSS-enrichment, FRiP, and peak-count QC.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="model">
+      <div class="wrap">
+        <h2>Model and Training Method</h2>
+        <p class="section-intro">
+          The active owned workflow is PyTorch-only and follows Prima's internal conventions: Python
+          3.11, <code>uv</code>, GPU/CPU extras, Polars preprocessing, and W&amp;B experiment tracking.
+        </p>
+
+        <div class="grid cols-3">
+          <div class="card"><h3>Input</h3><p>One-hot DNA sequence, default <strong>2,114 bp</strong>. Training regions come from peaks plus a 0.1 negative-sampling ratio.</p></div>
+          <div class="card"><h3>Shared trunk</h3><p>Conv1D <strong>4 &#8594; 512</strong>, kernel 21, followed by <strong>8 residual dilated layers</strong>, kernel 3, dilation 2 through 256.</p></div>
+          <div class="card"><h3>Outputs</h3><p>Two independent profile/count heads. Each profile uses a 75 bp convolution and center-crops to <strong>1,000 bp</strong>; each count head pools trunk features.</p></div>
+        </div>
+
+        <h3>Four-part multitask objective</h3>
+        <p><code>L = NLL(acc profile) + w_count MSE(acc log-count) + w_nuc-profile NLL(nuc profile) + w_nuc-count MSE(nuc log-count)</code></p>
+        <p>
+          The profile terms are multinomial negative log likelihoods, which learn the distribution
+          of signal within each output window. Count terms are mean-squared error on log total signal.
+          The current defaults set all three weights to 1.0. This makes
+          <code>--nucleosome-profile-weight</code> the most direct first lever for the weak profile
+          shape result, but weight changes must be judged on held-out shape metrics rather than loss
+          alone.
+        </p>
+
+        <h3>Data handling and leakage control</h3>
+        <ul>
+          <li>Training examples share sequence crop and reverse-complement transformation across both labels.</li>
+          <li>Training uses jitter up to 500 bp and reverse-complement augmentation; validation does not augment.</li>
+          <li>Chromosome partitions prevent nearby sequence windows from leaking between splits.</li>
+          <li>The current fold contains 19 training chromosomes, 2 validation chromosomes, and test chromosomes chr1, chr3, and chr6.</li>
+          <li>PyTorch DataLoader uses 16 workers by default, persistent workers, prefetch factor 2, and pinned memory when CUDA is available.</li>
+        </ul>
+
+        <h3>Single-cell-type versus multicell architectures</h3>
+        <div class="table-wrap">
+          <table aria-label="Model architecture options">
+            <thead><tr><th>Model</th><th>Conditioning</th><th>Head design</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td><code>MultiTaskNucleosomeModel</code></td><td>None</td><td>Shared trunk; one accessibility and one nucleosome head</td><td>Current GM12878 baseline</td></tr>
+              <tr><td><code>MultiCellMultiTaskModel</code></td><td>Cell-type index routes outputs</td><td>Per-cell profile/count parameters</td><td>Direct multicell baseline</td></tr>
+              <tr><td><code>ConditionedMultiCellModel</code></td><td>Identity-initialized FiLM/additive embedding</td><td>Shared heads</td><td>Scalable conditioning experiment</td></tr>
+              <tr><td><code>HybridMultiCellModel</code></td><td>Conditioned trunk</td><td>Shared accessibility; per-cell nucleosome head</td><td>Targets cell-specific spatial repositioning</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <p><strong>TensorFlow status.</strong> The owned training and evaluation entry points used in this project do not depend on TensorFlow or Keras. They point to PyTorch modules in <code>chrombpnet/multitask</code> and <code>chrombpnet/training/models</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="training">
+      <div class="wrap">
+        <h2>GM12878 Training Record</h2>
+        <p class="section-intro">
+          The completed Pierce2021 GM12878 run provides the current reproducible baseline. Training
+          used CUDA on an H100, 16 DataLoader workers, and early stopping after five non-improving
+          validation epochs.
+        </p>
+
+        <div class="grid cols-4">
+          <div class="card metric"><span class="metric-label">Epochs completed</span><strong class="metric-value">12</strong><div class="metric-note">early stopping triggered</div></div>
+          <div class="card metric"><span class="metric-label">Best epoch</span><strong class="metric-value">7</strong><div class="metric-note">checkpoint retained</div></div>
+          <div class="card metric"><span class="metric-label">Best step</span><strong class="metric-value">18,942</strong><div class="metric-note">2,706 steps per epoch</div></div>
+          <div class="card metric"><span class="metric-label">Best val loss</span><strong class="metric-value">1367.519</strong><div class="metric-note">not the final epoch value</div></div>
+        </div>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 6. GM12878 learning curve</p>
+            <p class="plot-subtitle">Total multitask loss by epoch; lower is better. The shaded region is the post-best patience window.</p>
+            <svg viewBox="0 0 820 330" role="img" aria-label="Training loss declines from 1596.806 at epoch 1 to 1372.595 at epoch 12. Validation loss reaches its minimum 1367.520 at epoch 7 then worsens, triggering early stopping at epoch 12.">
+              <g font-family="system-ui, sans-serif" font-size="11">
+                <rect x="490" y="30" width="270" height="220" fill="#fff2df" opacity="0.75"/>
+                <text x="625" y="47" text-anchor="middle" fill="#8a4b06" font-weight="700">early-stop patience window</text>
+                <g stroke="#e0e5e8">
+                  <line x1="70" y1="30" x2="760" y2="30"/><line x1="70" y1="115" x2="760" y2="115"/><line x1="70" y1="199" x2="760" y2="199"/><line x1="70" y1="250" x2="760" y2="250"/>
+                </g>
+                <g fill="#5b6670"><text x="60" y="34" text-anchor="end">1610</text><text x="60" y="119" text-anchor="end">1510</text><text x="60" y="203" text-anchor="end">1410</text><text x="60" y="254" text-anchor="end">1350</text></g>
+                <line x1="70" y1="250" x2="760" y2="250" stroke="#9aa7b0"/><line x1="70" y1="30" x2="70" y2="250" stroke="#9aa7b0"/>
+                <g fill="#5b6670">
+                  <text x="70" y="273" text-anchor="middle">1</text><text x="130" y="273" text-anchor="middle">2</text><text x="190" y="273" text-anchor="middle">3</text><text x="250" y="273" text-anchor="middle">4</text><text x="310" y="273" text-anchor="middle">5</text><text x="370" y="273" text-anchor="middle">6</text><text x="430" y="273" text-anchor="middle">7</text><text x="490" y="273" text-anchor="middle">8</text><text x="550" y="273" text-anchor="middle">9</text><text x="610" y="273" text-anchor="middle">10</text><text x="670" y="273" text-anchor="middle">11</text><text x="730" y="273" text-anchor="middle">12</text>
+                  <text x="415" y="301" text-anchor="middle" font-size="12">epoch</text>
+                  <text x="18" y="140" text-anchor="middle" transform="rotate(-90 18 140)" font-size="12">multitask loss</text>
+                </g>
+                <polyline points="70,41 130,143 190,174 250,188 310,199 370,206 430,211 490,216 550,221 610,225 670,228 730,231" fill="none" stroke="#2563a8" stroke-width="3"/>
+                <polyline points="70,130 130,169 190,190 250,186 310,201 370,224 430,235 490,214 550,223 610,227 670,193 730,184" fill="none" stroke="#087f73" stroke-width="3"/>
+                <g fill="#2563a8"><circle cx="70" cy="41" r="3"/><circle cx="130" cy="143" r="3"/><circle cx="190" cy="174" r="3"/><circle cx="250" cy="188" r="3"/><circle cx="310" cy="199" r="3"/><circle cx="370" cy="206" r="3"/><circle cx="430" cy="211" r="3"/><circle cx="490" cy="216" r="3"/><circle cx="550" cy="221" r="3"/><circle cx="610" cy="225" r="3"/><circle cx="670" cy="228" r="3"/><circle cx="730" cy="231" r="3"/></g>
+                <g fill="#087f73"><circle cx="70" cy="130" r="3"/><circle cx="130" cy="169" r="3"/><circle cx="190" cy="190" r="3"/><circle cx="250" cy="186" r="3"/><circle cx="310" cy="201" r="3"/><circle cx="370" cy="224" r="3"/><circle cx="430" cy="235" r="7" stroke="#fff" stroke-width="2"/><circle cx="490" cy="214" r="3"/><circle cx="550" cy="223" r="3"/><circle cx="610" cy="227" r="3"/><circle cx="670" cy="193" r="3"/><circle cx="730" cy="184" r="3"/></g>
+                <path d="M430 225 L430 185" stroke="#287a45" stroke-width="1.5"/><text x="430" y="177" text-anchor="middle" fill="#287a45" font-weight="700">best 1367.519</text>
+              </g>
+            </svg>
+            <div class="plot-legend"><span><i class="swatch" style="background:#2563a8"></i>train loss</span><span><i class="swatch" style="background:#087f73"></i>validation loss</span><span><i class="swatch" style="background:#fff2df;border:1px solid #e2bf8a;height:9px"></i>patience window</span></div>
+          </div>
+          <figcaption>The training loss continues improving after epoch 7, while validation performance degrades. Selecting the best checkpoint prevents the final epoch from replacing the better model.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Did longer training continue to improve held-out performance?</dd></div>
+          <div><dt>Observed result</dt><dd>Validation loss bottoms at epoch 7, then never exceeds that checkpoint through epoch 12.</dd></div>
+          <div><dt>Interpretation</dt><dd>The run begins overfitting or optimizing components not reflected in total validation improvement.</dd></div>
+          <div><dt>Limitation</dt><dd>Total loss does not show which profile/count component drives the late divergence.</dd></div>
+        </div>
+
+        <div class="table-wrap">
+          <table aria-label="Epoch by epoch GM12878 training losses">
+            <thead><tr><th>Epoch</th><th>Step</th><th>Train loss</th><th>Validation loss</th><th>Checkpoint status</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>2,706</td><td>1596.80625823</td><td>1492.11023055</td><td>Improved</td></tr>
+              <tr><td>2</td><td>5,412</td><td>1475.95918796</td><td>1445.39986968</td><td>Improved</td></tr>
+              <tr><td>3</td><td>8,118</td><td>1439.45563843</td><td>1420.95289166</td><td>Improved</td></tr>
+              <tr><td>4</td><td>10,824</td><td>1423.40165467</td><td>1425.62300426</td><td>No improvement</td></tr>
+              <tr><td>5</td><td>13,530</td><td>1410.69937151</td><td>1408.50210376</td><td>Improved</td></tr>
+              <tr><td>6</td><td>16,236</td><td>1401.77496106</td><td>1380.90638081</td><td>Improved</td></tr>
+              <tr class="selected"><td>7</td><td>18,942</td><td>1395.58741560</td><td>1367.51955389</td><td>Selected best</td></tr>
+              <tr><td>8</td><td>21,648</td><td>1389.92568044</td><td>1393.02921598</td><td>Patience 1/5</td></tr>
+              <tr><td>9</td><td>24,354</td><td>1384.34579188</td><td>1382.43192200</td><td>Patience 2/5</td></tr>
+              <tr><td>10</td><td>27,060</td><td>1379.75359017</td><td>1377.00055964</td><td>Patience 3/5</td></tr>
+              <tr><td>11</td><td>29,766</td><td>1376.39359601</td><td>1417.16658788</td><td>Patience 4/5</td></tr>
+              <tr><td>12</td><td>32,472</td><td>1372.59538233</td><td>1428.01075054</td><td>Early stop</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="evaluation">
+      <div class="wrap">
+        <h2>Held-out Evaluation</h2>
+        <p class="section-intro">
+          The selected epoch-7 checkpoint was evaluated on chr1, chr3, and chr6 using 8,000 peaks
+          and 8,000 nonpeaks. These chromosomes were not used for training or validation.
+        </p>
+
+        <div class="grid cols-4">
+          <div class="card metric"><span class="metric-label">Held-out loss</span><strong class="metric-value">978.276</strong><div class="metric-note">multitask test loss</div></div>
+          <div class="card metric"><span class="metric-label">Accessibility count r</span><strong class="metric-value">0.6179</strong><div class="metric-note">Pearson over peaks</div></div>
+          <div class="card metric"><span class="metric-label">Nucleosome count r</span><strong class="metric-value">0.5990</strong><div class="metric-note">Pearson over peaks</div></div>
+          <div class="card metric"><span class="metric-label">Peak AUROC</span><strong class="metric-value">0.8467</strong><div class="metric-note">accessibility count classifier</div></div>
+        </div>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 7. Count prediction on held-out peaks</p>
+            <p class="plot-subtitle">Pearson and Spearman correlation; higher is better.</p>
+            <div class="bar-list" role="img" aria-label="Accessibility count Pearson 0.6179 and Spearman 0.5615; nucleosome count Pearson 0.5990 and Spearman 0.5028">
+              <div class="bar-row"><strong>Acc Pearson</strong><div class="bar-track"><div class="bar-fill teal" style="width:61.79%"></div></div><span>0.6179</span></div>
+              <div class="bar-row"><strong>Acc Spearman</strong><div class="bar-track"><div class="bar-fill" style="width:56.15%"></div></div><span>0.5615</span></div>
+              <div class="bar-row"><strong>Nuc Pearson</strong><div class="bar-track"><div class="bar-fill green" style="width:59.90%"></div></div><span>0.5990</span></div>
+              <div class="bar-row"><strong>Nuc Spearman</strong><div class="bar-track"><div class="bar-fill violet" style="width:50.28%"></div></div><span>0.5028</span></div>
+            </div>
+          </div>
+          <figcaption>Both heads learn meaningful window-level signal; nucleosome count performance is close to accessibility count performance.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Does sequence predict how much signal occurs in a held-out peak window?</dd></div>
+          <div><dt>Observed result</dt><dd>Count Pearson is 0.6179 for accessibility and 0.5990 for nucleosome dyads.</dd></div>
+          <div><dt>Interpretation</dt><dd>Both output heads capture sequence-linked occupancy magnitude.</dd></div>
+          <div><dt>Limitation</dt><dd>Count correlation does not test exact base-resolution placement inside the window.</dd></div>
+        </div>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 8. Profile divergence versus a flat baseline</p>
+            <p class="plot-subtitle">Median Jensen-Shannon divergence; lower is better.</p>
+            <svg viewBox="0 0 850 300" role="img" aria-label="Accessibility predicted profile JSD 0.4512 compared with flat baseline 0.6438. Nucleosome predicted profile JSD 0.7680 compared with flat baseline 0.8391.">
+              <g font-family="system-ui, sans-serif" font-size="12">
+                <line x1="120" y1="245" x2="790" y2="245" stroke="#9aa7b0"/>
+                <g fill="#5b6670"><text x="120" y="268">0.0</text><text x="268" y="268">0.2</text><text x="417" y="268">0.4</text><text x="566" y="268">0.6</text><text x="715" y="268">0.8</text></g>
+                <text x="110" y="78" text-anchor="end" font-weight="700">Accessibility</text>
+                <rect x="120" y="47" width="336" height="28" fill="#087f73"/><text x="464" y="66" font-weight="700">model 0.4512</text>
+                <rect x="120" y="83" width="479" height="22" fill="#b8c2c9"/><text x="607" y="99" font-weight="700">flat 0.6438</text>
+                <text x="110" y="170" text-anchor="end" font-weight="700">Nucleosome</text>
+                <rect x="120" y="139" width="572" height="28" fill="#7055a7"/><text x="684" y="158" text-anchor="end" fill="white" font-weight="700">model 0.7680</text>
+                <rect x="120" y="175" width="625" height="22" fill="#b8c2c9"/><text x="737" y="191" text-anchor="end" font-weight="700">flat 0.8391</text>
+                <text x="120" y="224" fill="#287a45" font-weight="700">Improvement: accessibility 0.1926; nucleosome 0.0711</text>
+              </g>
+            </svg>
+          </div>
+          <figcaption>Both model profiles beat a uniform profile, but the nucleosome improvement is much smaller.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Does the predicted base-resolution shape beat a no-position baseline?</dd></div>
+          <div><dt>Observed result</dt><dd>Accessibility JSD improves by 0.1926; nucleosome JSD improves by 0.0711.</dd></div>
+          <div><dt>Interpretation</dt><dd>The nucleosome head learns some position structure, but far less strongly than accessibility.</dd></div>
+          <div><dt>Limitation</dt><dd>A flat baseline is weak; future comparison should include smoothed observed priors and transferred cfDNA trunks.</dd></div>
+        </div>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 9. Median profile Pearson correlation</p>
+            <p class="plot-subtitle">Correlation of predicted and observed profile shapes; higher is better.</p>
+            <div class="bar-list" role="img" aria-label="Accessibility median profile Pearson is 0.4867 and nucleosome median profile Pearson is 0.1851">
+              <div class="bar-row"><strong>Accessibility</strong><div class="bar-track"><div class="bar-fill teal" style="width:48.67%"></div></div><span>0.4867</span></div>
+              <div class="bar-row"><strong>Nucleosome</strong><div class="bar-track"><div class="bar-fill amber" style="width:18.51%"></div></div><span>0.1851</span></div>
+            </div>
+          </div>
+          <figcaption>The nucleosome profile-shape gap is the clearest quantitative reason to tune the dyad label, loss, and head before scaling.</figcaption>
+        </figure>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 10. Reverse-complement count consistency</p>
+            <p class="plot-subtitle">Pearson correlation between forward and reverse-complement count predictions.</p>
+            <div class="bar-list" role="img" aria-label="Reverse-complement count Pearson is 0.9579 for accessibility and 0.9641 for nucleosome; mean absolute differences are 0.1710 and 0.1333">
+              <div class="bar-row"><strong>Accessibility</strong><div class="bar-track"><div class="bar-fill" style="width:95.79%"></div></div><span>0.9579</span></div>
+              <div class="bar-row"><strong>Nucleosome</strong><div class="bar-track"><div class="bar-fill green" style="width:96.41%"></div></div><span>0.9641</span></div>
+            </div>
+            <p class="method-note">Mean absolute count difference: accessibility 0.1710; nucleosome 0.1333.</p>
+          </div>
+          <figcaption>Count predictions are strongly consistent under strand reversal, supporting the shared augmentation path.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Are count predictions stable when sequence orientation is reversed?</dd></div>
+          <div><dt>Observed result</dt><dd>Reverse-complement count Pearson is 0.9579 and 0.9641 for the two heads.</dd></div>
+          <div><dt>Interpretation</dt><dd>The model has learned strong count-level orientation consistency.</dd></div>
+          <div><dt>Limitation</dt><dd>High correlation is not exact equivariance and does not prove profile coordinates reverse perfectly.</dd></div>
+        </div>
+
+        <div class="table-wrap">
+          <table aria-label="Held-out evaluation metrics">
+            <thead><tr><th>Metric</th><th>Accessibility</th><th>Nucleosome</th><th>Direction</th><th>Reading</th></tr></thead>
+            <tbody>
+              <tr><td>Count Pearson, peaks</td><td>0.6179098651</td><td>0.5989942017</td><td>Higher</td><td>Both meaningful</td></tr>
+              <tr><td>Count Spearman, peaks</td><td>0.5614560981</td><td>0.5027967063</td><td>Higher</td><td>Rank ordering retained</td></tr>
+              <tr><td>Median profile JSD</td><td>0.4511845177</td><td>0.7679896093</td><td>Lower</td><td>Nucleosome weak</td></tr>
+              <tr><td>Flat profile JSD</td><td>0.6437919587</td><td>0.8390724101</td><td>Comparator</td><td>Both beat flat</td></tr>
+              <tr><td>Median profile Pearson</td><td>0.4866831811</td><td>0.1851320320</td><td>Higher</td><td>Large shape gap</td></tr>
+              <tr><td>Peak versus nonpeak AUROC</td><td>0.8467328984</td><td>Not measured</td><td>Higher</td><td>Accessibility count separates regions</td></tr>
+              <tr><td>Reverse-complement count Pearson</td><td>0.9578812591</td><td>0.9640916021</td><td>Higher</td><td>Strong consistency</td></tr>
+              <tr><td>Reverse-complement mean absolute difference</td><td>0.1710493118</td><td>0.1332606752</td><td>Lower</td><td>Not exact identity</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="multicell">
+      <div class="wrap">
+        <h2>Multicell Evidence and the Honest Metric</h2>
+        <p class="section-intro">
+          Separate corpus-scale diagnostics show that cell-type-specific nucleosome positioning is
+          measurable, but an existing 346-cell model primarily predicts the shared backbone.
+        </p>
+
+        <figure>
+          <div class="plot">
+            <p class="plot-title">Figure 11. Absolute prediction versus cell-type deviation</p>
+            <p class="plot-subtitle">Correlations on test chromosomes; these metrics answer different questions.</p>
+            <div class="bar-list" role="img" aria-label="Split-half nucleosome ceiling 0.770, model smoothed absolute profile correlation 0.369, deviation correlation across all comparable windows 0.030, and deviation correlation at 841 differential sites 0.217">
+              <div class="bar-row"><strong>Split-half ceiling</strong><div class="bar-track"><div class="bar-fill green" style="width:77.0%"></div></div><span>0.770</span></div>
+              <div class="bar-row"><strong>Absolute profile</strong><div class="bar-track"><div class="bar-fill" style="width:36.9%"></div></div><span>0.369</span></div>
+              <div class="bar-row"><strong>Deviation, all</strong><div class="bar-track"><div class="bar-fill red" style="width:3.0%"></div></div><span>0.030</span></div>
+              <div class="bar-row"><strong>Deviation, called</strong><div class="bar-track"><div class="bar-fill amber" style="width:21.7%"></div></div><span>0.217</span></div>
+            </div>
+          </div>
+          <figcaption>Absolute profile correlation is inflated by the sequence-driven backbone. Deviation correlation tests whether the model reproduces each cell type's departure from the leave-one-out consensus.</figcaption>
+        </figure>
+
+        <div class="finding">
+          <div><dt>Question</dt><dd>Does the model learn cell-type-specific nucleosome repositioning?</dd></div>
+          <div><dt>Observed result</dt><dd>Absolute r is 0.369, but overall deviation r is only 0.030 and called-site deviation r is 0.217.</dd></div>
+          <div><dt>Interpretation</dt><dd>The current multicell model is mostly backbone-collapsed, with weak signal at the strongest sites.</dd></div>
+          <div><dt>Limitation</dt><dd>The 346-cell diagnostic belongs to a separate multicell run, not the current single-cell-type GM12878 checkpoint.</dd></div>
+        </div>
+
+        <div class="grid cols-4">
+          <div class="card metric"><span class="metric-label">Split-half ceiling</span><strong class="metric-value">0.770</strong><div class="metric-note">target is not noise-limited at 0.37</div></div>
+          <div class="card metric"><span class="metric-label">Model / ceiling</span><strong class="metric-value">47%</strong><div class="metric-note">large headroom remains</div></div>
+          <div class="card metric"><span class="metric-label">Differential sites</span><strong class="metric-value">841</strong><div class="metric-note">5.4% of well-measured cell-windows</div></div>
+          <div class="card metric"><span class="metric-label">Median shift</span><strong class="metric-value">30 bp</strong><div class="metric-note">90th percentile approximately 78 bp</div></div>
+        </div>
+
+        <h3>Why cell-type-specific modeling remains viable</h3>
+        <p>
+          Depth-controlled cross-cell-type correlation divided by the split-half expectation is
+          0.68 for deep pairs. This indicates that roughly one third of reproducible positioning
+          differs among cell types rather than being shared. Differential calling identified 841
+          strong one-versus-rest sites in a 20-cell panel. The signal therefore exists; the model has
+          not yet captured most of it.
+        </p>
+        <div class="callout critical">
+          <p><strong>Selection rule for future multicell models.</strong> Do not select a model only because absolute nucleosome profile correlation rises. Require improvement in deviation correlation and repositioning direction at called sites under a shared chromosome holdout.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="wrap">
+        <h2>Decision Roadmap</h2>
+        <p class="section-intro">
+          The next work should convert the current benchmark into biological evidence before adding
+          corpus scale. Each stage has an explicit pass criterion and a decision it unlocks.
+        </p>
+
+        <div class="roadmap">
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Export GM12878 predicted accessibility and dyad bigWigs; inspect TSS, CTCF, high-signal, and error loci.</span></div><div><strong>Success criterion / decision</strong><span>Profiles are correctly oriented, positioned, and nonblank. Confirms whether the weak nucleosome Pearson reflects smoothing, phase shift, or diffuse predictions.</span></div></div>
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Train K562 and MCF7 with identical hyperparameters and their own Pierce2021 labels.</span></div><div><strong>Success criterion / decision</strong><span>Reproduce comparable count and profile metrics on shared held-out chromosomes. Establishes whether GM12878 behavior is cell-line-specific.</span></div></div>
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Sweep dyad smoothing, nucleosome profile weight, profile-kernel/head capacity, and optional cfDNA trunk transfer.</span></div><div><strong>Success criterion / decision</strong><span>Increase held-out nucleosome profile Pearson and JSD improvement without reducing count performance or strand consistency.</span></div></div>
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Train shared-trunk multicell baselines with per-cell head pairs and globally shared chromosome folds.</span></div><div><strong>Success criterion / decision</strong><span>Beat separate-model efficiency while retaining per-cell absolute metrics. Determines whether shared sequence grammar helps.</span></div></div>
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Evaluate cell-type deviation and shift direction at the 841 differential sites; compare per-cell, FiLM, and hybrid heads.</span></div><div><strong>Success criterion / decision</strong><span>Deviation and shift-direction correlations rise beyond the current 0.217 and 0.067 called-site baselines. Establishes real conditioning.</span></div></div>
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Add GENCODE TSS aggregation and orthogonal ENCODE MNase/DNase comparisons for GM12878 and K562.</span></div><div><strong>Success criterion / decision</strong><span>Recover +1/+2/+3 nucleosome arrays and agreement with assay-orthogonal tracks. Supports biological validity.</span></div></div>
+          <div class="roadmap-item"><div><strong>Experiment</strong><span>Expand through a QC manifest to deep heart, kidney, retina, brain, liver, lung, endocrine, and tumor samples.</span></div><div><strong>Success criterion / decision</strong><span>Stable metrics across lineage-balanced samples and a true entire-cell-type holdout. Tests generalization beyond cell lines.</span></div></div>
+        </div>
+
+        <h3>Highest-value immediate comparison</h3>
+        <p>
+          The most informative next experiment is not a longer GM12878 run. It is a matched
+          three-cell-line matrix: GM12878, K562, and MCF7, same chromosome fold, same optimization,
+          each with its own cutsite and dyad tracks. That matrix separates model weakness from
+          label/cell-type effects and creates the first controlled input to a shared-trunk multicell
+          model.
+        </p>
+      </div>
+    </section>
+
+    <section id="appendix">
+      <div class="wrap">
+        <h2>Reproducibility Appendix</h2>
+        <p class="section-intro">
+          Commands and artifacts below describe the active repository workflow. Historical cfDNA and
+          multicell results are mapped to their own source documents and should not be conflated with
+          the current GM12878 checkpoint.
+        </p>
+
+        <h3>Environment</h3>
+        <pre class="command">cd /home/jay/repos/chrombpnet
+uv sync --extra gpu --extra peaks
+
+# Active stack
+# Python 3.11 / uv / PyTorch / Polars / pyBigWig / MACS3 / W&amp;B</pre>
+
+        <h3>Build cell-type label tracks</h3>
+        <pre class="command">uv run chrombpnet-build-tracks \
+  --frag data/GM12878.fragments.tsv.gz \
+  --chrom-sizes data/hg38.chrom.sizes \
+  --mode cutsite \
+  --plus-shift 4 --minus-shift -4 \
+  --out data/GM12878.accessibility_cutsite.bw
+
+uv run chrombpnet-build-tracks \
+  --frag data/GM12878.fragments.tsv.gz \
+  --chrom-sizes data/hg38.chrom.sizes \
+  --mode dyad \
+  --min-len 150 --max-len 250 \
+  --out data/GM12878.nucleosome_dyad.bw</pre>
+        <p class="method-note">If the local concatenated fragment filename differs, substitute the actual Pierce2021 GM12878 fragment path. The track modes and parameters above match the implemented defaults.</p>
+
+        <h3>Call peaks and GC-matched nonpeaks</h3>
+        <pre class="command">uv run bash call_peaks.sh \
+  data/GM12878.fragments.tsv.gz \
+  data/GM12878_peaks</pre>
+
+        <h3>Reproduce the current training path</h3>
+        <pre class="command">uv run chrombpnet-train-multitask \
+  -p data/GM12878_peaks/peaks.narrowPeak \
+  -n data/GM12878_peaks/nonpeaks.narrowPeak \
+  -g data/hg38.fa \
+  --acc-bw data/GM12878.accessibility_cutsite.bw \
+  --nuc-bw data/GM12878.nucleosome_dyad.bw \
+  -fl data/folds/fold_0.json \
+  -o runs/GM12878_multitask_full/model \
+  --num-workers 16 \
+  --wandb \
+  --wandb-run-name GM12878_multitask_full</pre>
+        <p class="method-note">This is the current-code reproduction command using the recorded paths and trainer defaults. The original launch shell history was not retained; the epoch log and checkpoint are the archival run record.</p>
+
+        <h3>Held-out test evaluation</h3>
+        <pre class="command">uv run chrombpnet-eval-multitask \
+  -c runs/GM12878_multitask_full/model.pt \
+  -p data/GM12878_peaks/peaks.narrowPeak \
+  -n data/GM12878_peaks/nonpeaks.narrowPeak \
+  -g data/hg38.fa \
+  --acc-bw data/GM12878.accessibility_cutsite.bw \
+  --nuc-bw data/GM12878.nucleosome_dyad.bw \
+  -fl data/folds/fold_0.json \
+  --split test --device cuda \
+  --batch-size 512 --num-workers 16 \
+  -o runs/GM12878_multitask_full/eval_test.json \
+  --wandb \
+  --wandb-run-name GM12878_multitask_full_eval_test</pre>
+
+        <h3>Current artifacts</h3>
+        <div class="table-wrap">
+          <table aria-label="Current project artifacts">
+            <thead><tr><th>Artifact</th><th>Location</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td>Data root</td><td><code>/home/jay/repos/chrombpnet/data</code> &#8594; <code>/mnt/data/jganbat/chrombpnet/data</code></td><td>NFS-backed large-file storage</td></tr>
+              <tr><td>Genome</td><td><code>data/hg38.fa</code></td><td>Sequence input</td></tr>
+              <tr><td>Chromosome sizes</td><td><code>data/hg38.chrom.sizes</code></td><td>Track headers and coordinate checks</td></tr>
+              <tr><td>Fold</td><td><code>data/folds/fold_0.json</code></td><td>Shared chromosome split</td></tr>
+              <tr><td>Peaks</td><td><code>data/GM12878_peaks/peaks.narrowPeak</code></td><td>Positive regions</td></tr>
+              <tr><td>Nonpeaks</td><td><code>data/GM12878_peaks/nonpeaks.narrowPeak</code></td><td>GC-matched background</td></tr>
+              <tr><td>Accessibility label</td><td><code>data/GM12878.accessibility_cutsite.bw</code></td><td>Head-1 target</td></tr>
+              <tr><td>Nucleosome label</td><td><code>data/GM12878.nucleosome_dyad.bw</code></td><td>Head-2 target</td></tr>
+              <tr><td>Best checkpoint</td><td><code>runs/GM12878_multitask_full/model.pt</code></td><td>Epoch-7 model state and arguments</td></tr>
+              <tr><td>Epoch log</td><td><code>runs/GM12878_multitask_full/model.log</code></td><td>Training and validation losses</td></tr>
+              <tr><td>Console log</td><td><code>runs/GM12878_multitask_full/train.out</code></td><td>Run progress and save confirmation</td></tr>
+              <tr><td>Evaluation</td><td><code>runs/GM12878_multitask_full/eval_test.json</code></td><td>Held-out metrics</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Experiment tracking</h3>
+        <div class="refs">
+          <a href="https://wandb.ai/prima-mente/jg_experiments/runs/1mukqg1e">GM12878_multitask_full training run</a>
+          <a href="https://wandb.ai/prima-mente/jg_experiments/runs/fdjlp26p">GM12878_multitask_full_eval_test evaluation run</a>
+          <span>W&amp;B artifact: <code>GM12878_multitask_full_model</code></span>
+        </div>
+
+        <h3>Source map</h3>
+        <div class="table-wrap">
+          <table aria-label="Source document map">
+            <thead><tr><th>Finding group</th><th>Repository source</th><th>Evidence represented here</th></tr></thead>
+            <tbody>
+              <tr><td>Project handoff and Gate 0</td><td><code>HANDOFF.md</code></td><td>Pierce2021 selection, insert diagnostics, active workflow</td></tr>
+              <tr><td>Corpus inventory</td><td><code>docs/dataset_curation.md</code></td><td>724.6 GiB, 68 samples, 26 studies, lineage/QC plan</td></tr>
+              <tr><td>cfDNA phase 1</td><td><code>docs/nucleosome_model_phase1_results.md</code></td><td>Held-out profile/count correlation and NRL recovery</td></tr>
+              <tr><td>Bias and conditioning</td><td><code>docs/nucleosome_model_phase2_3_results.md</code></td><td>4-mer floor, receptive-field ablation, FiLM limitation</td></tr>
+              <tr><td>Multicell diagnostic</td><td><code>docs/corpus_nucleosome_diagnostic.md</code></td><td>Ceiling, differential sites, deviation metrics</td></tr>
+              <tr><td>GM12878 training</td><td><code>runs/GM12878_multitask_full/model.log</code></td><td>All 12 epoch losses and selected checkpoint</td></tr>
+              <tr><td>GM12878 test</td><td><code>runs/GM12878_multitask_full/eval_test.json</code></td><td>All held-out head, AUROC, and reverse-complement metrics</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Known limitations</h3>
+        <ul>
+          <li>The current completed baseline is one cell type and one fold; it does not establish cross-cell-type or unseen-cell-type generalization.</li>
+          <li>The nucleosome target is derived from scATAC fragment centers, not orthogonal MNase measurements.</li>
+          <li>Bias correction for the accessibility head and blacklist subtraction remain deferred in the owned multitask path.</li>
+          <li>The flat-profile baseline is necessary but weak; stronger profile baselines are still needed.</li>
+          <li>Reverse-complement count consistency is not a full proof of exact profile equivariance.</li>
+          <li>Several historical multicell findings come from separate models and must not be attributed to the GM12878 checkpoint.</li>
+        </ul>
+
+        <h3>Glossary</h3>
+        <dl class="glossary">
+          <div><dt>Cutsite</dt><dd>A base-position estimate of a Tn5 insertion after strand-specific coordinate shifting.</dd></div>
+          <div><dt>Dyad</dt><dd>The estimated nucleosome center, represented here by the midpoint of a mono-nucleosomal ATAC fragment.</dd></div>
+          <div><dt>Profile</dt><dd>The normalized base-resolution distribution of signal inside the 1,000 bp output window.</dd></div>
+          <div><dt>Count</dt><dd>The total target signal in an output window, modeled on a log scale.</dd></div>
+          <div><dt>JSD</dt><dd>Jensen-Shannon divergence between predicted and observed distributions; lower is better.</dd></div>
+          <div><dt>Profile Pearson</dt><dd>Linear correlation between predicted and observed base-resolution shapes within regions.</dd></div>
+          <div><dt>Count Pearson</dt><dd>Linear correlation of predicted and observed window-level totals across regions.</dd></div>
+          <div><dt>Reverse-complement consistency</dt><dd>Agreement when the same locus is presented in the opposite sequence orientation.</dd></div>
+          <div><dt>Chromosome holdout</dt><dd>A split where entire chromosomes are excluded from training to reduce sequence leakage.</dd></div>
+          <div><dt>Cell-type deviation</dt><dd>A cell type's normalized profile minus the leave-one-out consensus profile, isolating specific positioning from the shared backbone.</dd></div>
+          <div><dt>Split-half ceiling</dt><dd>Reproducibility between independent halves of the observed data, approximating the achievable upper bound.</dd></div>
+          <div><dt>NRL</dt><dd>Nucleosome repeat length, observed as a roughly 190-200 bp periodicity in nucleosome arrays.</dd></div>
+        </dl>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      Comprehensive private project report generated from repository-local evidence. Current-run
+      values are copied from <code>model.log</code> and <code>eval_test.json</code>; historical values
+      are attributed in the source map above.
+    </div>
+  </footer>
+</body>
+</html>
