@@ -284,6 +284,9 @@ class ArtifactRunnerTests(unittest.TestCase):
         calls = pl.read_parquet(artifacts.calls_path)
         summary = json.loads(artifacts.summary_path.read_text())
         cached = np.load(artifacts.profiles_path)
+        self.assertEqual(summary["chromosomes"], ["chr1"])
+        self.assertEqual(Path(summary["manifest"]), manifest_path.resolve())
+        self.assertEqual(Path(summary["metadata"]), metadata_path.resolve())
         self.assertEqual(set(calls["cell_type"].to_list()), {"a1", "a2", "a3", "a4"})
         self.assertEqual(calls.height, 4)
         self.assertTrue(
@@ -296,6 +299,32 @@ class ArtifactRunnerTests(unittest.TestCase):
         self.assertEqual(cached["raw"].shape, (1, 4, 51))
         self.assertEqual(cached["normalized"].shape, (1, 4, 51))
         self.assertTrue((artifacts.beds_dir / "a1.diffnuc.bed").exists())
+
+    def test_chrom_filter_limits_every_artifact_call_to_requested_chromosomes(self):
+        manifest_path, metadata_path, regions_path = self._write_cohort_inputs()
+        output_dir = self.root / "filtered-result"
+
+        artifacts = call_differential_nucleosomes(
+            manifest_path=manifest_path,
+            metadata_path=metadata_path,
+            output_dir=output_dir,
+            regions_path=regions_path,
+            chroms={"chr1"},
+            window=51,
+            config=CallConfig(
+                sigma=2,
+                max_shift=10,
+                min_counts=10,
+                min_effect=0.05,
+                min_robust_z=1,
+                noise_multiplier=1,
+                min_lineage_comparators=3,
+                seed=13,
+            ),
+        )
+
+        calls = pl.read_parquet(artifacts.calls_path)
+        self.assertEqual(set(calls["chrom"].to_list()), {"chr1"})
 
 
 if __name__ == "__main__":

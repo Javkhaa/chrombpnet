@@ -457,6 +457,9 @@ def call_differential_nucleosomes(
     lineage_counts = cohort.group_by("lineage").len().sort("lineage")
     summary = {
         "analysis": "adult_lineage_aware_differential_nucleosome_positioning",
+        "manifest": str(Path(manifest_path).resolve()),
+        "metadata": str(Path(metadata_path).resolve()),
+        "chromosomes": sorted(loci["chrom"].unique().to_list()),
         "candidate_source": candidate_source,
         "cohort": {
             "cell_types": cohort.height,
