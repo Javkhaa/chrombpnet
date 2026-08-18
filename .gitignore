@@ -13,6 +13,7 @@ data/
 *.pkl
 *.pyc
 .venv/
+.worktrees/
 __pycache__/
 experimental_scripts
 needs_cleanup
