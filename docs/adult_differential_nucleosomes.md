@@ -176,8 +176,10 @@ uv run chrombpnet-call-diff-nucleosomes \
 Run the three-lambda pilot from the original hybrid checkpoint. Preserve the
 existing `pilot`, `pilot_ampfix`, and `final` directories byte-identically as
 superseded audit evidence. After code approval, the corrected pooled-metric sweep
-must write to `pilot_metricfix`. CUDA `--amp` and GradScaler remain requested, but
-all model forwards are forced to float32 to preserve profile-logit resolution.
+must write to `pilot_metricfix`. `--amp` is retained only as a CLI compatibility
+and provenance flag: this feature currently performs no active mixed-precision
+model forward and uses no GradScaler scaling. Every model forward is float32 to
+preserve profile-logit resolution.
 
 ```bash
 uv run chrombpnet-finetune-diff-nucleosomes train \

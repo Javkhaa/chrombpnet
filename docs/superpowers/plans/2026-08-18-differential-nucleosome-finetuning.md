@@ -907,8 +907,9 @@ a documented corrective re-evaluation, with
 `final_metricfix/final_validation.json` supplied through the required
 `--validation-report` binding.
 
-The CUDA commands continue to request `--amp`/GradScaler, but every model forward
-is forced to float32 to preserve profile-logit resolution. Candidate, final, and
-evaluation schema-v2 JSON must contain pooled endpoint counts, exact checkpoint
-hashes, and protocol bindings; prior JSON without these fields is not accepted for
-the corrective evaluation.
+The CUDA commands retain `--amp` only as a CLI compatibility and provenance flag.
+This feature currently performs no active mixed-precision model forward and uses
+no GradScaler scaling; every model forward is float32 to preserve profile-logit
+resolution. Candidate, final, and evaluation schema-v2 JSON must contain pooled
+endpoint counts, exact checkpoint hashes, and protocol bindings; prior JSON without
+these fields is not accepted for the corrective evaluation.

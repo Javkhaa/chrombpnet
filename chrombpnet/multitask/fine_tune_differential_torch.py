@@ -75,6 +75,34 @@ APPROVED_VALID_CHROMOSOMES = frozenset({"chr8", "chr20"})
 APPROVED_TEST_CHROMOSOMES = frozenset({"chr1", "chr3", "chr6"})
 APPROVED_PILOT_LAMBDAS = (0.25, 1.0, 4.0)
 REPORT_SCHEMA_VERSION = 2
+DIFFERENTIAL_METRIC_NAMES = (
+    "deviation_pearson",
+    "effect_spearman",
+    "shift_direction_accuracy",
+    "shift_mae_bp",
+    "average_precision",
+)
+ORDINARY_METRIC_NAMES = (
+    "nuc_profile_pearson",
+    "nuc_profile_nll",
+    "nuc_count_mse",
+    "acc_profile_pearson",
+    "acc_profile_nll",
+    "acc_count_mse",
+)
+INVARIANT_NAMES = (
+    "accessibility_unchanged",
+    "non_adult_unchanged",
+    "profile_bias_unchanged",
+)
+GATE_CHECK_NAMES = (
+    "differential_metrics_finite",
+    "differential_coverage_matches",
+    "nuc_profile_pearson_preserved",
+    "nuc_profile_nll_preserved",
+    "shift_direction_preserved",
+    *INVARIANT_NAMES,
+)
 
 
 @dataclass(frozen=True)
@@ -192,16 +220,24 @@ class _CleanupStack:
         self._callbacks.append((label, callback))
 
     def close(self) -> None:
+        failures = []
         while self._callbacks:
             label, callback = self._callbacks.pop()
             try:
                 callback()
             except Exception as error:  # noqa: BLE001 - cleanup must continue
-                warnings.warn(
-                    f"cleanup failed for {label}: {error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+                failures.append(f"cleanup failed for {label}: {error}")
+        _warn_cleanup_failures(failures)
+
+
+def _warn_cleanup_failures(failures: list[str]) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", RuntimeWarning)
+        for message in failures:
+            try:
+                warnings.warn(message, RuntimeWarning, stacklevel=3)
+            except Exception:  # noqa: BLE001,S110 - diagnostics cannot break cleanup
+                pass
 
 
 def start_wandb_run(
@@ -502,6 +538,431 @@ def _require_bound_path(
         raise ValueError(f"{label} SHA-256 does not match")
 
 
+def _require_object(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{label} must be an object")
+    return value
+
+
+def _require_positive_step(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def _require_approved_lambda(value: object, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) not in APPROVED_PILOT_LAMBDAS
+    ):
+        raise ValueError(f"{label} is not an approved value")
+    return float(value)
+
+
+def _require_metric(value: object, label: str) -> float | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise TypeError(f"{label} must be a finite number or null")
+    return float(value)
+
+
+def _require_count(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TypeError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _parse_differential_metrics(payload: object, label: str) -> dict[str, object]:
+    metrics = _require_object(payload, label)
+    parsed: dict[str, object] = {}
+    for name in DIFFERENTIAL_METRIC_NAMES:
+        if name not in metrics:
+            raise ValueError(f"{label}.{name} is required")
+        parsed[name] = _require_metric(metrics[name], f"{label}.{name}")
+    target_rows = _require_count(
+        metrics.get("target_locus_rows"), f"{label}.target_locus_rows"
+    )
+    context_units = _require_count(
+        metrics.get("context_units"), f"{label}.context_units"
+    )
+    counts = _require_object(metrics.get("counts"), f"{label}.counts")
+    parsed_counts: dict[str, dict[str, int]] = {}
+    for endpoint in DIFFERENTIAL_METRIC_NAMES:
+        endpoint_counts = _require_object(
+            counts.get(endpoint), f"{label}.counts.{endpoint}"
+        )
+        expected = _require_count(
+            endpoint_counts.get("expected"),
+            f"{label}.counts.{endpoint}.expected",
+        )
+        eligible = _require_count(
+            endpoint_counts.get("eligible"),
+            f"{label}.counts.{endpoint}.eligible",
+        )
+        scored = _require_count(
+            endpoint_counts.get("scored"),
+            f"{label}.counts.{endpoint}.scored",
+        )
+        if not 0 <= scored <= eligible <= expected:
+            raise ValueError(f"{label}.counts.{endpoint} is inconsistent")
+        if expected != target_rows:
+            raise ValueError(
+                f"{label}.counts.{endpoint}.expected does not match target rows"
+            )
+        parsed_count = {
+            "expected": expected,
+            "eligible": eligible,
+            "scored": scored,
+        }
+        if endpoint == "average_precision":
+            positives = _require_count(
+                endpoint_counts.get("positives"),
+                f"{label}.counts.average_precision.positives",
+            )
+            if positives > expected:
+                raise ValueError(
+                    f"{label}.counts.average_precision.positives exceeds expected"
+                )
+            parsed_count["positives"] = positives
+        parsed_counts[endpoint] = parsed_count
+    coverage_complete = metrics.get("coverage_complete")
+    if not isinstance(coverage_complete, bool):
+        raise TypeError(f"{label}.coverage_complete must be boolean")
+    recomputed_coverage = all(
+        values["eligible"] == values["scored"] for values in parsed_counts.values()
+    )
+    if coverage_complete != recomputed_coverage:
+        raise ValueError(f"{label} counts do not match coverage_complete")
+    parsed.update(
+        {
+            "target_locus_rows": target_rows,
+            "context_units": context_units,
+            "counts": parsed_counts,
+            "coverage_complete": coverage_complete,
+        }
+    )
+    return parsed
+
+
+def _parse_ordinary_metrics(payload: object, label: str) -> dict[str, object]:
+    metrics = _require_object(payload, label)
+    parsed = {}
+    for name in ORDINARY_METRIC_NAMES:
+        if name not in metrics:
+            raise ValueError(f"{label}.{name} is required")
+        parsed[name] = _require_metric(metrics[name], f"{label}.{name}")
+    return parsed
+
+
+def _parse_validation_summary(payload: object, label: str) -> dict[str, object]:
+    summary = _require_object(payload, label)
+    parsed = {
+        **_parse_differential_metrics(summary, label),
+        **_parse_ordinary_metrics(summary, label),
+    }
+    for name in INVARIANT_NAMES:
+        value = summary.get(name)
+        if not isinstance(value, bool):
+            raise TypeError(f"{label}.{name} must be boolean")
+        parsed[name] = value
+    return parsed
+
+
+def _parse_comparison(payload: object, label: str) -> dict[str, object]:
+    comparison = _require_object(payload, label)
+    parsed: dict[str, object] = {}
+    for side in ("base", "tuned"):
+        side_payload = _require_object(comparison.get(side), f"{label}.{side}")
+        parsed[side] = {
+            "differential": _parse_differential_metrics(
+                side_payload.get("differential"),
+                f"{label}.{side}.differential",
+            ),
+            "ordinary": _parse_ordinary_metrics(
+                side_payload.get("ordinary"), f"{label}.{side}.ordinary"
+            ),
+        }
+    return parsed
+
+
+def _parse_stored_gate_checks(payload: object, label: str) -> dict[str, bool]:
+    checks = _require_object(payload, label)
+    if set(checks) != set(GATE_CHECK_NAMES):
+        raise ValueError(f"{label} does not contain the complete gate set")
+    parsed: dict[str, bool] = {}
+    for name in GATE_CHECK_NAMES:
+        value = checks[name]
+        if not isinstance(value, bool):
+            raise TypeError(f"{label}.{name} must be boolean")
+        parsed[name] = value
+    return parsed
+
+
+def _validate_evidence_bundle(
+    *,
+    validation: object,
+    comparison: object,
+    stored_gate_checks: object,
+    stored_passes_gates: object,
+    label: str,
+) -> dict[str, object]:
+    parsed_validation = _parse_validation_summary(validation, f"{label}.validation")
+    parsed_comparison = _parse_comparison(comparison, f"{label}.comparison")
+    tuned = parsed_comparison["tuned"]
+    if parsed_validation != {
+        **tuned["differential"],
+        **tuned["ordinary"],
+        **{name: parsed_validation[name] for name in INVARIANT_NAMES},
+    }:
+        raise ValueError(
+            f"{label} selected validation metrics/counts do not match comparison"
+        )
+    base_gate = {
+        **parsed_comparison["base"]["differential"],
+        **parsed_comparison["base"]["ordinary"],
+    }
+    tuned_gate = {
+        **tuned["differential"],
+        **tuned["ordinary"],
+        **{name: parsed_validation[name] for name in INVARIANT_NAMES},
+    }
+    recomputed_checks = gate_checks(base_gate, tuned_gate)
+    asserted_checks = _parse_stored_gate_checks(
+        stored_gate_checks, f"{label}.gate_checks"
+    )
+    if asserted_checks != recomputed_checks:
+        raise ValueError(f"{label} stored gate checks do not match recomputation")
+    if not isinstance(stored_passes_gates, bool):
+        raise TypeError(f"{label}.passes_gates must be boolean")
+    recomputed_pass = all(recomputed_checks.values())
+    if stored_passes_gates != recomputed_pass:
+        raise ValueError(f"{label} aggregate gate does not match recomputation")
+    return {
+        "validation": parsed_validation,
+        "comparison": parsed_comparison,
+        "gate_checks": recomputed_checks,
+        "passes_gates": recomputed_pass,
+    }
+
+
+def _validate_passing_report_evidence(
+    report: Mapping[str, object],
+    *,
+    label: str,
+    expected_protocol_kind: str,
+) -> dict[str, object]:
+    if report.get("status") != "passing" or report.get("passes_gates") is not True:
+        raise ValueError(f"{label} must identify a passing gate")
+    selected_step = _require_positive_step(
+        report.get("selected_step"), f"{label} selected step"
+    )
+    lambda_dev = _require_approved_lambda(report.get("lambda_dev"), f"{label} lambda")
+    protocol = _require_object(report.get("run_protocol"), f"{label} protocol")
+    if protocol.get("kind") != expected_protocol_kind:
+        raise ValueError(f"{label} protocol must be {expected_protocol_kind}")
+    history = report.get("validation_history")
+    if not isinstance(history, list) or not history:
+        raise ValueError(f"{label} validation history must be nonempty")
+    selected_records = []
+    for index, raw_record in enumerate(history):
+        record_label = f"{label} validation history record {index}"
+        record = _require_object(raw_record, record_label)
+        step = _require_positive_step(record.get("step"), f"{record_label} step")
+        record_lambda = _require_approved_lambda(
+            record.get("lambda_dev"), f"{record_label} lambda"
+        )
+        if record_lambda != lambda_dev:
+            raise ValueError(f"{record_label} lambda does not match report")
+        if record.get("run_protocol") != protocol:
+            raise ValueError(f"{record_label} protocol does not match report")
+        evidence = _validate_evidence_bundle(
+            validation=record.get("validation"),
+            comparison=record.get("comparison"),
+            stored_gate_checks=record.get("gate_checks"),
+            stored_passes_gates=record.get("passes_gates"),
+            label=record_label,
+        )
+        if step == selected_step:
+            selected_records.append(evidence)
+    if len(selected_records) != 1:
+        raise ValueError(
+            f"{label} validation history must contain exactly one selected step"
+        )
+    selected = selected_records[0]
+    selected_comparison = selected["comparison"]
+    for side in ("base", "tuned"):
+        differential = selected_comparison[side]["differential"]
+        ordinary = selected_comparison[side]["ordinary"]
+        if (
+            differential["target_locus_rows"] < 1
+            or differential["context_units"] < 1
+            or any(differential[name] is None for name in DIFFERENTIAL_METRIC_NAMES)
+            or any(ordinary[name] is None for name in ORDINARY_METRIC_NAMES)
+        ):
+            raise ValueError(f"{label} selected {side} metrics are incomplete")
+    top_level = _validate_evidence_bundle(
+        validation=report.get("validation"),
+        comparison=report.get("comparison"),
+        stored_gate_checks=report.get("gate_checks"),
+        stored_passes_gates=report.get("passes_gates"),
+        label=f"{label} selected evidence",
+    )
+    if top_level != selected:
+        raise ValueError(
+            f"{label} selected metrics/counts do not match selected history record"
+        )
+    if top_level["passes_gates"] is not True:
+        raise ValueError(f"{label} selected evidence does not pass recomputed gates")
+    return {
+        "selected_step": selected_step,
+        "lambda_dev": lambda_dev,
+        "run_protocol": dict(protocol),
+        **top_level,
+    }
+
+
+def _require_self_bound_path(
+    payload: Mapping[str, object],
+    *,
+    path_key: str,
+    hash_key: str,
+    label: str,
+) -> Path:
+    stored_path = payload.get(path_key)
+    stored_hash = payload.get(hash_key)
+    if not isinstance(stored_path, str) or not isinstance(stored_hash, str):
+        raise TypeError(f"{label} path and SHA-256 must be strings")
+    path = Path(stored_path).resolve()
+    if stored_hash != _sha256(path):
+        raise ValueError(f"{label} SHA-256 does not match")
+    return path
+
+
+def _validate_selected_pilot_provenance(
+    selection: Mapping[str, object],
+    *,
+    base_checkpoint_path: Path,
+    expected_lambda: float,
+) -> None:
+    if (
+        selection.get("schema_version") != REPORT_SCHEMA_VERSION
+        or selection.get("analysis") != "differential_nucleosome_pilot_selection"
+        or selection.get("passes_gates") is not True
+    ):
+        raise ValueError("selected pilot report is not a passing schema-v2 selection")
+    selected_lambda = _require_approved_lambda(
+        selection.get("lambda_dev"), "selected pilot lambda"
+    )
+    if selected_lambda != expected_lambda:
+        raise ValueError("selected pilot lambda does not match final validation")
+    selected_step = _require_positive_step(
+        selection.get("selected_step"), "selected pilot step"
+    )
+    _require_bound_path(
+        selection,
+        path_key="base_checkpoint",
+        hash_key="base_checkpoint_sha256",
+        expected=base_checkpoint_path,
+        label="selected pilot base checkpoint",
+    )
+    candidates = selection.get("candidates")
+    selected_index = selection.get("selected_candidate_index")
+    if (
+        not isinstance(candidates, list)
+        or not candidates
+        or isinstance(selected_index, bool)
+        or not isinstance(selected_index, int)
+        or not 0 <= selected_index < len(candidates)
+    ):
+        raise ValueError("selected pilot candidate index is invalid")
+    candidate = _require_object(candidates[selected_index], "selected pilot candidate")
+    if candidate.get("passes_gates") is not True:
+        raise ValueError("selected pilot candidate does not assert passing gates")
+    if (
+        _require_approved_lambda(
+            candidate.get("lambda_dev"), "selected pilot candidate lambda"
+        )
+        != selected_lambda
+    ):
+        raise ValueError("selected pilot candidate lambda does not match selection")
+    if (
+        _require_positive_step(
+            candidate.get("selected_step"), "selected pilot candidate step"
+        )
+        != selected_step
+    ):
+        raise ValueError("selected pilot candidate step does not match selection")
+    candidate_checkpoint = _require_self_bound_path(
+        candidate,
+        path_key="checkpoint",
+        hash_key="checkpoint_sha256",
+        label="selected pilot candidate checkpoint",
+    )
+    candidate_report_path = _require_self_bound_path(
+        candidate,
+        path_key="report",
+        hash_key="report_sha256",
+        label="selected pilot candidate report",
+    )
+    _require_bound_path(
+        selection,
+        path_key="checkpoint",
+        hash_key="checkpoint_sha256",
+        expected=candidate_checkpoint,
+        label="selected pilot checkpoint",
+    )
+    _require_bound_path(
+        selection,
+        path_key="selected_report",
+        hash_key="selected_report_sha256",
+        expected=candidate_report_path,
+        label="selected pilot validation report",
+    )
+    candidate_report = _read_json_object(
+        candidate_report_path, "selected pilot candidate report"
+    )
+    if (
+        candidate_report.get("schema_version") != REPORT_SCHEMA_VERSION
+        or candidate_report.get("analysis") != "differential_nucleosome_validation"
+        or candidate_report.get("split") != "validation"
+    ):
+        raise ValueError("selected pilot candidate report schema is invalid")
+    _require_bound_path(
+        candidate_report,
+        path_key="base_checkpoint",
+        hash_key="base_checkpoint_sha256",
+        expected=base_checkpoint_path,
+        label="selected pilot candidate base checkpoint",
+    )
+    _require_bound_path(
+        candidate_report,
+        path_key="selected_checkpoint",
+        hash_key="selected_checkpoint_sha256",
+        expected=candidate_checkpoint,
+        label="selected pilot candidate checkpoint",
+    )
+    candidate_evidence = _validate_passing_report_evidence(
+        candidate_report,
+        label="selected pilot candidate report",
+        expected_protocol_kind="pilot_sweep_candidate",
+    )
+    if (
+        candidate_evidence["selected_step"] != selected_step
+        or candidate_evidence["lambda_dev"] != selected_lambda
+    ):
+        raise ValueError("selected pilot candidate evidence does not match selection")
+    for key in ("validation", "comparison", "gate_checks"):
+        if candidate.get(key) != candidate_report.get(key):
+            raise ValueError(f"selected pilot candidate {key} does not match report")
+
+
 def load_passing_validation_report(
     validation_report_path: Path,
     *,
@@ -532,27 +993,12 @@ def load_passing_validation_report(
         expected=tuned_checkpoint_path,
         label="selected checkpoint",
     )
-    selected_step = report.get("selected_step")
-    if (
-        isinstance(selected_step, bool)
-        or not isinstance(selected_step, int)
-        or selected_step < 1
-    ):
-        raise ValueError("validation report selected step must be a positive integer")
-    lambda_dev = report.get("lambda_dev")
-    if (
-        isinstance(lambda_dev, bool)
-        or not isinstance(lambda_dev, (int, float))
-        or not math.isfinite(float(lambda_dev))
-        or float(lambda_dev) not in APPROVED_PILOT_LAMBDAS
-    ):
-        raise ValueError("validation report lambda is not an approved value")
-
-    protocol = report.get("run_protocol")
-    if not isinstance(protocol, dict):
-        raise TypeError("validation report protocol must be an object")
-    if protocol.get("kind") != "selected_pilot_restart":
-        raise ValueError("validation report protocol must be selected_pilot_restart")
+    evidence = _validate_passing_report_evidence(
+        report,
+        label="validation report",
+        expected_protocol_kind="selected_pilot_restart",
+    )
+    protocol = evidence["run_protocol"]
     selected_pilot_path = protocol.get("selected_pilot_json")
     selected_pilot_hash = protocol.get("selected_pilot_json_sha256")
     if not isinstance(selected_pilot_path, str) or not isinstance(
@@ -563,20 +1009,10 @@ def load_passing_validation_report(
     if selected_pilot_hash != _sha256(selected_path):
         raise ValueError("validation report selected-pilot SHA-256 does not match")
     selection = _read_json_object(selected_path, "selected pilot report")
-    if (
-        selection.get("schema_version") != REPORT_SCHEMA_VERSION
-        or selection.get("analysis") != "differential_nucleosome_pilot_selection"
-        or selection.get("passes_gates") is not True
-    ):
-        raise ValueError("validation report protocol references an invalid selection")
-    if float(selection.get("lambda_dev", float("nan"))) != float(lambda_dev):
-        raise ValueError("validation report lambda does not match selected pilot")
-    _require_bound_path(
+    _validate_selected_pilot_provenance(
         selection,
-        path_key="base_checkpoint",
-        hash_key="base_checkpoint_sha256",
-        expected=base_checkpoint_path,
-        label="selected pilot base checkpoint",
+        base_checkpoint_path=base_checkpoint_path,
+        expected_lambda=evidence["lambda_dev"],
     )
     return report
 
@@ -994,7 +1430,8 @@ def evaluate_checkpoints(
         )
         profile_bias_unchanged = _profile_bias_unchanged(base_model, tuned_model)
         passes_evaluation_gate = (
-            _differential_coverage_matches(base_differential, tuned_differential)
+            _differential_values_finite(base_differential, tuned_differential)
+            and _differential_coverage_matches(base_differential, tuned_differential)
             and accessibility_unchanged
             and non_adult_unchanged
             and profile_bias_unchanged
@@ -1046,7 +1483,7 @@ def _validation_snapshot(
     device: torch.device,
     amp: bool,
     base_differential: dict[str, object],
-) -> tuple[dict[str, object], dict[str, object], bool]:
+) -> tuple[dict[str, object], dict[str, object], dict[str, bool], bool]:
     tuned_differential = _score_differential(
         tuned_model, prepared.valid_dataset, device, amp
     )
@@ -1083,7 +1520,13 @@ def _validation_snapshot(
             "ordinary": tuned_ordinary,
         },
     }
-    return validation, comparison, passes_gates(base_gate, tuned_gate)
+    recomputed_gate_checks = gate_checks(base_gate, tuned_gate)
+    return (
+        validation,
+        comparison,
+        recomputed_gate_checks,
+        all(recomputed_gate_checks.values()),
+    )
 
 
 def _save_finetuned_checkpoint(
@@ -1131,6 +1574,7 @@ def _close_replay_loader(loader: DataLoader) -> None:
         dataset = dataset.dataset
     if not isinstance(dataset, _DatasetCollection):
         return
+    failures = []
     for wrapper in dataset.datasets:
         source = wrapper.dataset
         for attribute in ("_genome", "_acc_bw", "_nuc_bw"):
@@ -1139,13 +1583,12 @@ def _close_replay_loader(loader: DataLoader) -> None:
                 try:
                     handle.close()
                 except Exception as error:  # noqa: BLE001 - close remaining handles
-                    warnings.warn(
-                        f"cleanup failed for replay handle {attribute}: {error}",
-                        RuntimeWarning,
-                        stacklevel=2,
+                    failures.append(
+                        f"cleanup failed for replay handle {attribute}: {error}"
                     )
                 finally:
                     setattr(source, attribute, None)
+    _warn_cleanup_failures(failures)
 
 
 def _run_single_finetune_owned(
@@ -1236,8 +1679,10 @@ def _run_single_finetune_owned(
     validation_history = []
     selected_validation: dict[str, object] = {}
     selected_comparison: dict[str, object] = {}
+    selected_gate_checks: dict[str, bool] = {}
     last_validation: dict[str, object] = {}
     last_comparison: dict[str, object] = {}
+    last_gate_checks: dict[str, bool] = {}
     selected_step = None
     last_step_result = None
     best_rank = (float("-inf"), float("-inf"))
@@ -1284,18 +1729,29 @@ def _run_single_finetune_owned(
             )
             if step % config.validate_every != 0 and step != config.steps:
                 continue
-            validation, comparison, gate_status = _validation_snapshot(
-                base_model,
-                prepared.model,
-                prepared,
-                device,
-                config.amp,
-                base_differential,
+            validation, comparison, current_gate_checks, gate_status = (
+                _validation_snapshot(
+                    base_model,
+                    prepared.model,
+                    prepared,
+                    device,
+                    config.amp,
+                    base_differential,
+                )
             )
             last_validation = validation
             last_comparison = comparison
+            last_gate_checks = current_gate_checks
             validation_history.append(
-                {"step": step, "passes_gates": gate_status, **validation}
+                {
+                    "step": step,
+                    "lambda_dev": config.lambda_dev,
+                    "run_protocol": provenance["run_protocol"],
+                    "validation": validation,
+                    "comparison": comparison,
+                    "gate_checks": current_gate_checks,
+                    "passes_gates": gate_status,
+                }
             )
             logger.log(
                 {
@@ -1320,6 +1776,7 @@ def _run_single_finetune_owned(
                 selected_step = step
                 selected_validation = validation
                 selected_comparison = comparison
+                selected_gate_checks = current_gate_checks
                 _save_finetuned_checkpoint(
                     checkpoint_path, prepared.model, prepared, config, step
                 )
@@ -1341,6 +1798,7 @@ def _run_single_finetune_owned(
             "passes_gates": selected_step is not None,
             "validation": selected_validation or last_validation,
             "comparison": selected_comparison or last_comparison,
+            "gate_checks": selected_gate_checks or last_gate_checks,
             "validation_history": validation_history,
             "last_train_step": (
                 vars(last_step_result) if last_step_result is not None else None
@@ -1411,14 +1869,27 @@ def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
         ),
         default=None,
     )
+    candidate_reports = [
+        _read_json_object(run.report_path, "pilot candidate report") for run in runs
+    ]
+    selected_index = runs.index(selected) if selected is not None else None
+    selected_report_path = selected.report_path if selected is not None else None
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "analysis": "differential_nucleosome_pilot_selection",
         "passes_gates": selected is not None,
         "lambda_dev": selected.lambda_dev if selected is not None else None,
         "selected_step": selected.selected_step if selected is not None else None,
-        "checkpoint": (
-            selected.checkpoint_path if selected is not None else config.checkpoint
+        "selected_candidate_index": selected_index,
+        "checkpoint": selected.checkpoint_path if selected is not None else None,
+        "checkpoint_sha256": (
+            _sha256(selected.checkpoint_path)
+            if selected is not None and selected.checkpoint_path is not None
+            else None
+        ),
+        "selected_report": selected_report_path,
+        "selected_report_sha256": (
+            _sha256(selected_report_path) if selected_report_path is not None else None
         ),
         "base_checkpoint": config.checkpoint.resolve(),
         "base_checkpoint_sha256": _sha256(config.checkpoint),
@@ -1435,9 +1906,11 @@ def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
                 ),
                 "report": run.report_path,
                 "report_sha256": _sha256(run.report_path),
-                "validation": run.validation,
+                "validation": candidate_report.get("validation"),
+                "comparison": candidate_report.get("comparison"),
+                "gate_checks": candidate_report.get("gate_checks"),
             }
-            for run in runs
+            for run, candidate_report in zip(runs, candidate_reports, strict=True)
         ],
     }
     _write_json(selection_path, payload)
@@ -1608,60 +2081,59 @@ def _metric(metrics: Mapping[str, object], name: str) -> float:
     return float(value)
 
 
-def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> bool:
-    """Apply all approved preservation thresholds to a candidate checkpoint."""
+def gate_checks(
+    base: Mapping[str, object], tuned: Mapping[str, object]
+) -> dict[str, bool]:
+    """Recompute every approved candidate gate from metric evidence."""
     base_pearson = _metric(base, "nuc_profile_pearson")
     tuned_pearson = _metric(tuned, "nuc_profile_pearson")
     base_nll = _metric(base, "nuc_profile_nll")
     tuned_nll = _metric(tuned, "nuc_profile_nll")
     base_shift = _metric(base, "shift_direction_accuracy")
     tuned_shift = _metric(tuned, "shift_direction_accuracy")
-    differential_names = (
-        "deviation_pearson",
-        "effect_spearman",
-        "shift_direction_accuracy",
-        "shift_mae_bp",
-        "average_precision",
-    )
-    if not all(
-        math.isfinite(value)
-        for value in (
-            base_pearson,
-            tuned_pearson,
-            base_nll,
-            tuned_nll,
-            base_shift,
-            tuned_shift,
-            *(_metric(base, name) for name in differential_names),
-            *(_metric(tuned, name) for name in differential_names),
-        )
-    ):
-        return False
-    if not _differential_coverage_matches(base, tuned):
-        return False
-    if tuned_pearson < base_pearson - 0.01:
-        return False
-    if tuned_nll > base_nll * 1.02:
-        return False
-    if tuned_shift < base_shift:
-        return False
-    return (
-        tuned.get("accessibility_unchanged") is True
-        and tuned.get("non_adult_unchanged") is True
-        and tuned.get("profile_bias_unchanged") is True
+    differential_metrics_finite = _differential_values_finite(base, tuned)
+    return {
+        "differential_metrics_finite": differential_metrics_finite,
+        "differential_coverage_matches": _differential_coverage_matches(base, tuned),
+        "nuc_profile_pearson_preserved": (
+            math.isfinite(base_pearson)
+            and math.isfinite(tuned_pearson)
+            and tuned_pearson >= base_pearson - 0.01
+        ),
+        "nuc_profile_nll_preserved": (
+            math.isfinite(base_nll)
+            and math.isfinite(tuned_nll)
+            and tuned_nll <= base_nll * 1.02
+        ),
+        "shift_direction_preserved": (
+            math.isfinite(base_shift)
+            and math.isfinite(tuned_shift)
+            and tuned_shift >= base_shift
+        ),
+        "accessibility_unchanged": tuned.get("accessibility_unchanged") is True,
+        "non_adult_unchanged": tuned.get("non_adult_unchanged") is True,
+        "profile_bias_unchanged": tuned.get("profile_bias_unchanged") is True,
+    }
+
+
+def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> bool:
+    """Apply all approved preservation thresholds to a candidate checkpoint."""
+    return all(gate_checks(base, tuned).values())
+
+
+def _differential_values_finite(
+    base: Mapping[str, object], tuned: Mapping[str, object]
+) -> bool:
+    return all(
+        math.isfinite(_metric(metrics, name))
+        for metrics in (base, tuned)
+        for name in DIFFERENTIAL_METRIC_NAMES
     )
 
 
 def _differential_coverage_matches(
     base: Mapping[str, object], tuned: Mapping[str, object]
 ) -> bool:
-    endpoint_names = (
-        "deviation_pearson",
-        "effect_spearman",
-        "shift_direction_accuracy",
-        "shift_mae_bp",
-        "average_precision",
-    )
     base_counts = base.get("counts")
     tuned_counts = tuned.get("counts")
     return bool(
@@ -1670,11 +2142,6 @@ def _differential_coverage_matches(
         and isinstance(base_counts, dict)
         and isinstance(tuned_counts, dict)
         and base_counts == tuned_counts
-        and all(
-            math.isfinite(_metric(metrics, name))
-            for metrics in (base, tuned)
-            for name in endpoint_names
-        )
     )
 
 

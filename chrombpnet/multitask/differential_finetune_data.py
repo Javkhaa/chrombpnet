@@ -208,25 +208,25 @@ class PairedContextDataset(Dataset):
 
     @staticmethod
     def _close_handles(genome, bigwigs) -> None:
+        failures = []
         if bigwigs is not None:
             for label, bigwig in bigwigs.items():
                 try:
                     bigwig.close()
                 except Exception as error:  # noqa: BLE001 - close all owned handles
-                    warnings.warn(
-                        f"BigWig close failed for {label}: {error}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                    failures.append(f"BigWig close failed for {label}: {error}")
         if genome is not None:
             try:
                 genome.close()
             except Exception as error:  # noqa: BLE001 - close all owned handles
-                warnings.warn(
-                    f"FASTA close failed: {error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+                failures.append(f"FASTA close failed: {error}")
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            for message in failures:
+                try:
+                    warnings.warn(message, RuntimeWarning, stacklevel=2)
+                except Exception:  # noqa: BLE001,S110 - diagnostics cannot break cleanup
+                    pass
 
     def close(self) -> None:
         """Close lazy FASTA and BigWig handles and allow later reopening."""

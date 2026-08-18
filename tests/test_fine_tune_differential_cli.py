@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -1169,7 +1170,16 @@ class OrchestrationContractTests(unittest.TestCase):
                 score = {0.25: 0.9, 1.0: 0.4, 4.0: 0.7}[candidate.lambda_dev]
                 candidate.out_dir.mkdir(parents=True, exist_ok=True)
                 report_path = candidate.out_dir / f"{candidate.output_name}.json"
-                report_path.write_text("{}\n")
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "validation": {"deviation_pearson": score},
+                            "comparison": {"candidate_lambda": candidate.lambda_dev},
+                            "gate_checks": {"synthetic_pass": passing},
+                        }
+                    )
+                    + "\n"
+                )
                 checkpoint_path = candidate.out_dir / f"{candidate.output_name}.pt"
                 if passing:
                     checkpoint_path.write_bytes(b"checkpoint")
@@ -1208,6 +1218,20 @@ class OrchestrationContractTests(unittest.TestCase):
             self.assertEqual(
                 selection["base_checkpoint_sha256"],
                 hashlib.sha256(b"base checkpoint").hexdigest(),
+            )
+            self.assertEqual(selection["selected_candidate_index"], 2)
+            self.assertEqual(
+                selection["checkpoint_sha256"],
+                hashlib.sha256(b"checkpoint").hexdigest(),
+            )
+            selected_candidate = selection["candidates"][2]
+            self.assertEqual(
+                selected_candidate["gate_checks"], {"synthetic_pass": True}
+            )
+            self.assertEqual(selection["selected_report"], selected_candidate["report"])
+            self.assertEqual(
+                selection["selected_report_sha256"],
+                selected_candidate["report_sha256"],
             )
 
     def test_pilot_sweep_requires_the_exact_approved_lambda_set(self):
@@ -1262,30 +1286,191 @@ class ValidationReportBindingTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.base = self.root / "base.pt"
         self.tuned = self.root / "tuned.pt"
+        self.pilot_checkpoint = self.root / "pilot.pt"
+        self.pilot_report = self.root / "pilot_validation.json"
         self.selection = self.root / "selected_pilot.json"
         self.report = self.root / "final_validation.json"
         self.base.write_bytes(b"base checkpoint")
         self.tuned.write_bytes(b"tuned checkpoint")
-        self.selection.write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "analysis": "differential_nucleosome_pilot_selection",
-                    "passes_gates": True,
-                    "lambda_dev": 4.0,
-                    "base_checkpoint": str(self.base.resolve()),
-                    "base_checkpoint_sha256": hashlib.sha256(
-                        self.base.read_bytes()
-                    ).hexdigest(),
-                }
-            )
-            + "\n"
-        )
+        self.pilot_checkpoint.write_bytes(b"pilot checkpoint")
+        self._write_pilot_evidence()
 
     def tearDown(self):
         self.temporary_directory.cleanup()
 
+    @staticmethod
+    def _counts() -> dict[str, dict[str, int]]:
+        counts = {
+            name: {"expected": 4, "eligible": 4, "scored": 4}
+            for name in (
+                "deviation_pearson",
+                "effect_spearman",
+                "shift_direction_accuracy",
+                "shift_mae_bp",
+            )
+        }
+        counts["average_precision"] = {
+            "expected": 4,
+            "eligible": 4,
+            "scored": 4,
+            "positives": 1,
+        }
+        return counts
+
+    def _differential(self) -> dict[str, object]:
+        return {
+            "deviation_pearson": 0.4,
+            "effect_spearman": 0.5,
+            "shift_direction_accuracy": 0.75,
+            "shift_mae_bp": 4.0,
+            "average_precision": 0.6,
+            "target_locus_rows": 4,
+            "context_units": 1,
+            "counts": self._counts(),
+            "coverage_complete": True,
+        }
+
+    @staticmethod
+    def _ordinary() -> dict[str, float]:
+        return {
+            "nuc_profile_pearson": 0.5,
+            "nuc_profile_nll": 100.0,
+            "nuc_count_mse": 1.0,
+            "acc_profile_pearson": 0.6,
+            "acc_profile_nll": 80.0,
+            "acc_count_mse": 2.0,
+        }
+
+    @staticmethod
+    def _gate_checks() -> dict[str, bool]:
+        return {
+            "differential_metrics_finite": True,
+            "differential_coverage_matches": True,
+            "nuc_profile_pearson_preserved": True,
+            "nuc_profile_nll_preserved": True,
+            "shift_direction_preserved": True,
+            "accessibility_unchanged": True,
+            "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
+        }
+
+    def _evidence(
+        self,
+        *,
+        step: int,
+        lambda_dev: float,
+        protocol: dict[str, object],
+    ) -> dict[str, object]:
+        differential = self._differential()
+        ordinary = self._ordinary()
+        validation = {
+            **differential,
+            **ordinary,
+            "accessibility_unchanged": True,
+            "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
+        }
+        comparison = {
+            "base": {
+                "differential": copy.deepcopy(differential),
+                "ordinary": dict(ordinary),
+            },
+            "tuned": {
+                "differential": copy.deepcopy(differential),
+                "ordinary": dict(ordinary),
+            },
+        }
+        gate_checks = self._gate_checks()
+        history = {
+            "step": step,
+            "lambda_dev": lambda_dev,
+            "run_protocol": copy.deepcopy(protocol),
+            "validation": copy.deepcopy(validation),
+            "comparison": copy.deepcopy(comparison),
+            "gate_checks": dict(gate_checks),
+            "passes_gates": True,
+        }
+        return {
+            "validation": validation,
+            "comparison": comparison,
+            "gate_checks": gate_checks,
+            "validation_history": [history],
+        }
+
+    def _candidate_report_payload(self) -> dict[str, object]:
+        protocol = {"kind": "pilot_sweep_candidate"}
+        return {
+            "schema_version": 2,
+            "analysis": "differential_nucleosome_validation",
+            "split": "validation",
+            "status": "passing",
+            "passes_gates": True,
+            "base_checkpoint": str(self.base.resolve()),
+            "base_checkpoint_sha256": hashlib.sha256(
+                self.base.read_bytes()
+            ).hexdigest(),
+            "selected_checkpoint": str(self.pilot_checkpoint.resolve()),
+            "selected_checkpoint_sha256": hashlib.sha256(
+                self.pilot_checkpoint.read_bytes()
+            ).hexdigest(),
+            "selected_step": 2_000,
+            "lambda_dev": 4.0,
+            "run_protocol": protocol,
+            **self._evidence(step=2_000, lambda_dev=4.0, protocol=protocol),
+        }
+
+    def _selection_payload(self) -> dict[str, object]:
+        candidate_report_hash = hashlib.sha256(
+            self.pilot_report.read_bytes()
+        ).hexdigest()
+        pilot_checkpoint_hash = hashlib.sha256(
+            self.pilot_checkpoint.read_bytes()
+        ).hexdigest()
+        candidate_report = json.loads(self.pilot_report.read_text())
+        candidate = {
+            "lambda_dev": 4.0,
+            "passes_gates": True,
+            "selected_step": 2_000,
+            "checkpoint": str(self.pilot_checkpoint.resolve()),
+            "checkpoint_sha256": pilot_checkpoint_hash,
+            "report": str(self.pilot_report.resolve()),
+            "report_sha256": candidate_report_hash,
+            "validation": candidate_report["validation"],
+            "comparison": candidate_report["comparison"],
+            "gate_checks": candidate_report["gate_checks"],
+        }
+        return {
+            "schema_version": 2,
+            "analysis": "differential_nucleosome_pilot_selection",
+            "passes_gates": True,
+            "lambda_dev": 4.0,
+            "selected_step": 2_000,
+            "selected_candidate_index": 0,
+            "checkpoint": str(self.pilot_checkpoint.resolve()),
+            "checkpoint_sha256": pilot_checkpoint_hash,
+            "selected_report": str(self.pilot_report.resolve()),
+            "selected_report_sha256": candidate_report_hash,
+            "base_checkpoint": str(self.base.resolve()),
+            "base_checkpoint_sha256": hashlib.sha256(
+                self.base.read_bytes()
+            ).hexdigest(),
+            "candidates": [candidate],
+        }
+
+    def _write_pilot_evidence(self) -> None:
+        self.pilot_report.write_text(
+            json.dumps(self._candidate_report_payload()) + "\n"
+        )
+        self.selection.write_text(json.dumps(self._selection_payload()) + "\n")
+
     def _payload(self) -> dict[str, object]:
+        protocol = {
+            "kind": "selected_pilot_restart",
+            "selected_pilot_json": str(self.selection.resolve()),
+            "selected_pilot_json_sha256": hashlib.sha256(
+                self.selection.read_bytes()
+            ).hexdigest(),
+        }
         return {
             "schema_version": 2,
             "analysis": "differential_nucleosome_validation",
@@ -1302,14 +1487,38 @@ class ValidationReportBindingTests(unittest.TestCase):
             ).hexdigest(),
             "selected_step": 9_500,
             "lambda_dev": 4.0,
-            "run_protocol": {
-                "kind": "selected_pilot_restart",
-                "selected_pilot_json": str(self.selection.resolve()),
-                "selected_pilot_json_sha256": hashlib.sha256(
-                    self.selection.read_bytes()
-                ).hexdigest(),
-            },
+            "run_protocol": protocol,
+            **self._evidence(step=9_500, lambda_dev=4.0, protocol=protocol),
         }
+
+    def _assert_rejected_before_data(
+        self, payload: dict[str, object], message: str
+    ) -> None:
+        self.report.write_text(json.dumps(payload) + "\n")
+        with (
+            patch(
+                "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint"
+            ) as load_checkpoint,
+            patch(
+                "chrombpnet.multitask.fine_tune_differential_torch.read_manifest"
+            ) as load_manifest,
+            patch(
+                "chrombpnet.multitask.fine_tune_differential_torch.pl.read_parquet"
+            ) as load_calls,
+            patch(
+                "chrombpnet.multitask.fine_tune_differential_torch.PairedContextDataset"
+            ) as open_context_tracks,
+            patch(
+                "chrombpnet.multitask.fine_tune_differential_torch.build_adult_replay_loader"
+            ) as open_replay_tracks,
+            self.assertRaisesRegex((TypeError, ValueError), message),
+        ):
+            self._evaluate()
+        load_checkpoint.assert_not_called()
+        load_manifest.assert_not_called()
+        load_calls.assert_not_called()
+        open_context_tracks.assert_not_called()
+        open_replay_tracks.assert_not_called()
 
     def _evaluate(self):
         return evaluate_checkpoints(
@@ -1326,6 +1535,18 @@ class ValidationReportBindingTests(unittest.TestCase):
             device_name="cpu",
             amp=False,
         )
+
+    def test_complete_hash_bound_recomputed_evidence_is_accepted(self):
+        self.report.write_text(json.dumps(self._payload()) + "\n")
+
+        loaded = fine_tune.load_passing_validation_report(
+            self.report,
+            base_checkpoint_path=self.base,
+            tuned_checkpoint_path=self.tuned,
+        )
+
+        self.assertEqual(loaded["selected_step"], 9_500)
+        self.assertEqual(loaded["gate_checks"], self._gate_checks())
 
     def test_missing_malformed_or_failing_report_aborts_before_any_data_load(self):
         cases = (
@@ -1390,6 +1611,107 @@ class ValidationReportBindingTests(unittest.TestCase):
                 load_checkpoint.assert_not_called()
                 load_manifest.assert_not_called()
                 load_calls.assert_not_called()
+
+    def test_metadata_only_or_missing_evidence_is_rejected_before_data_load(self):
+        complete = self._payload()
+        metadata_only = {
+            key: value
+            for key, value in complete.items()
+            if key
+            not in {
+                "validation",
+                "comparison",
+                "gate_checks",
+                "validation_history",
+            }
+        }
+        missing_history = copy.deepcopy(complete)
+        missing_history.pop("validation_history")
+        missing_metrics = copy.deepcopy(complete)
+        missing_metrics["validation_history"][0]["comparison"]["base"][
+            "differential"
+        ].pop("effect_spearman")
+        missing_counts = copy.deepcopy(complete)
+        missing_counts["validation_history"][0]["comparison"]["tuned"]["differential"][
+            "counts"
+        ].pop("shift_mae_bp")
+        for label, payload in (
+            ("metadata_only", metadata_only),
+            ("missing_history", missing_history),
+            ("missing_metrics", missing_metrics),
+            ("missing_counts", missing_counts),
+        ):
+            with self.subTest(label=label):
+                self._assert_rejected_before_data(
+                    payload, "evidence|history|comparison"
+                )
+
+    def test_selected_step_must_have_exactly_one_complete_history_record(self):
+        duplicate = self._payload()
+        duplicate["validation_history"].append(
+            copy.deepcopy(duplicate["validation_history"][0])
+        )
+        missing = self._payload()
+        missing["validation_history"][0]["step"] = 9_250
+        for label, payload in (("duplicate", duplicate), ("missing", missing)):
+            with self.subTest(label=label):
+                self._assert_rejected_before_data(payload, "selected step|history")
+
+    def test_asserted_gate_status_must_equal_recomputed_gates(self):
+        stored_gate_mismatch = self._payload()
+        stored_gate_mismatch["validation_history"][0]["gate_checks"][
+            "shift_direction_preserved"
+        ] = False
+        aggregate_mismatch = self._payload()
+        aggregate_mismatch["validation_history"][0]["passes_gates"] = False
+        for label, payload in (
+            ("stored_gate", stored_gate_mismatch),
+            ("aggregate", aggregate_mismatch),
+        ):
+            with self.subTest(label=label):
+                self._assert_rejected_before_data(payload, "gate")
+
+    def test_top_level_metrics_and_counts_must_match_selected_history(self):
+        metric_mismatch = self._payload()
+        for metrics in (
+            metric_mismatch["validation"],
+            metric_mismatch["comparison"]["tuned"]["differential"],
+        ):
+            metrics["effect_spearman"] = 0.1
+        count_mismatch = self._payload()
+        for metrics in (
+            count_mismatch["validation"],
+            count_mismatch["comparison"]["base"]["differential"],
+            count_mismatch["comparison"]["tuned"]["differential"],
+        ):
+            metrics["counts"]["average_precision"]["positives"] = 2
+        for label, payload in (
+            ("metric", metric_mismatch),
+            ("count", count_mismatch),
+        ):
+            with self.subTest(label=label):
+                self._assert_rejected_before_data(payload, "selected.*match|counts")
+
+    def test_forged_selected_pilot_candidate_is_rejected_before_data_load(self):
+        forged_report = self._candidate_report_payload()
+        forged_report["validation_history"][0]["gate_checks"][
+            "shift_direction_preserved"
+        ] = False
+        self.pilot_report.write_text(json.dumps(forged_report) + "\n")
+        forged_selection = self._selection_payload()
+        self.selection.write_text(json.dumps(forged_selection) + "\n")
+        self._assert_rejected_before_data(self._payload(), "pilot.*gate|candidate")
+
+    def test_selected_lambda_must_match_final_report_and_candidate(self):
+        mismatched_selection = self._selection_payload()
+        mismatched_selection["lambda_dev"] = 1.0
+        self.selection.write_text(json.dumps(mismatched_selection) + "\n")
+        self._assert_rejected_before_data(self._payload(), "pilot.*lambda")
+
+        mismatched_candidate = self._selection_payload()
+        mismatched_candidate["candidates"][0]["lambda_dev"] = 1.0
+        self.selection.write_text(json.dumps(mismatched_candidate) + "\n")
+        self._assert_rejected_before_data(self._payload(), "pilot.*lambda|candidate")
 
 
 class CleanupAndWandbTests(unittest.TestCase):
@@ -1574,7 +1896,7 @@ class CleanupAndWandbTests(unittest.TestCase):
         loader = SimpleNamespace(dataset=collection)
 
         with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+            warnings.simplefilter("error")
             _close_replay_loader(loader)
 
         self.assertEqual(attempted, labels)
@@ -1625,7 +1947,7 @@ class CleanupAndWandbTests(unittest.TestCase):
                     warnings.catch_warnings(record=True) as caught,
                     self.assertRaisesRegex(RuntimeError, "score failed"),
                 ):
-                    warnings.simplefilter("always")
+                    warnings.simplefilter("error")
                     self._call_evaluation(
                         Path(temporary_directory),
                         context_dataset,
@@ -2003,16 +2325,137 @@ class RealOrchestrationTests(unittest.TestCase):
             },
             self.root / "base.pt",
         )
+        counts = {
+            name: {"expected": 4, "eligible": 4, "scored": 4}
+            for name in (
+                "deviation_pearson",
+                "effect_spearman",
+                "shift_direction_accuracy",
+                "shift_mae_bp",
+            )
+        }
+        counts["average_precision"] = {
+            "expected": 4,
+            "eligible": 4,
+            "scored": 4,
+            "positives": 1,
+        }
+        differential = {
+            "deviation_pearson": 0.4,
+            "effect_spearman": 0.5,
+            "shift_direction_accuracy": 0.75,
+            "shift_mae_bp": 4.0,
+            "average_precision": 0.6,
+            "target_locus_rows": 4,
+            "context_units": 1,
+            "counts": counts,
+            "coverage_complete": True,
+        }
+        ordinary = {
+            "nuc_profile_pearson": 0.5,
+            "nuc_profile_nll": 100.0,
+            "nuc_count_mse": 1.0,
+            "acc_profile_pearson": 0.6,
+            "acc_profile_nll": 80.0,
+            "acc_count_mse": 2.0,
+        }
+        validation = {
+            **differential,
+            **ordinary,
+            "accessibility_unchanged": True,
+            "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
+        }
+        comparison = {
+            side: {
+                "differential": copy.deepcopy(differential),
+                "ordinary": dict(ordinary),
+            }
+            for side in ("base", "tuned")
+        }
+        stored_gate_checks = {
+            "differential_metrics_finite": True,
+            "differential_coverage_matches": True,
+            "nuc_profile_pearson_preserved": True,
+            "nuc_profile_nll_preserved": True,
+            "shift_direction_preserved": True,
+            "accessibility_unchanged": True,
+            "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
+        }
+        pilot_protocol = {"kind": "pilot_sweep_candidate"}
+        pilot_checkpoint = self.root / "pilot.pt"
+        pilot_checkpoint.write_bytes((self.root / "base.pt").read_bytes())
+        pilot_report = self.root / "pilot_validation.json"
+        pilot_report.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "analysis": "differential_nucleosome_validation",
+                    "split": "validation",
+                    "status": "passing",
+                    "passes_gates": True,
+                    "base_checkpoint": str((self.root / "base.pt").resolve()),
+                    "base_checkpoint_sha256": hashlib.sha256(
+                        (self.root / "base.pt").read_bytes()
+                    ).hexdigest(),
+                    "selected_checkpoint": str(pilot_checkpoint.resolve()),
+                    "selected_checkpoint_sha256": hashlib.sha256(
+                        pilot_checkpoint.read_bytes()
+                    ).hexdigest(),
+                    "selected_step": 2,
+                    "lambda_dev": 1.0,
+                    "run_protocol": pilot_protocol,
+                    "validation": validation,
+                    "comparison": comparison,
+                    "gate_checks": stored_gate_checks,
+                    "validation_history": [
+                        {
+                            "step": 2,
+                            "lambda_dev": 1.0,
+                            "run_protocol": pilot_protocol,
+                            "validation": validation,
+                            "comparison": comparison,
+                            "gate_checks": stored_gate_checks,
+                            "passes_gates": True,
+                        }
+                    ],
+                }
+            )
+            + "\n"
+        )
+        pilot_checkpoint_hash = hashlib.sha256(
+            pilot_checkpoint.read_bytes()
+        ).hexdigest()
+        pilot_report_hash = hashlib.sha256(pilot_report.read_bytes()).hexdigest()
+        candidate = {
+            "lambda_dev": 1.0,
+            "passes_gates": True,
+            "selected_step": 2,
+            "checkpoint": str(pilot_checkpoint.resolve()),
+            "checkpoint_sha256": pilot_checkpoint_hash,
+            "report": str(pilot_report.resolve()),
+            "report_sha256": pilot_report_hash,
+            "validation": validation,
+            "comparison": comparison,
+            "gate_checks": stored_gate_checks,
+        }
         selection = {
             "schema_version": 2,
             "analysis": "differential_nucleosome_pilot_selection",
             "passes_gates": True,
             "lambda_dev": 1.0,
             "selected_step": 2,
+            "selected_candidate_index": 0,
+            "checkpoint": str(pilot_checkpoint.resolve()),
+            "checkpoint_sha256": pilot_checkpoint_hash,
+            "selected_report": str(pilot_report.resolve()),
+            "selected_report_sha256": pilot_report_hash,
             "base_checkpoint": str((self.root / "base.pt").resolve()),
             "base_checkpoint_sha256": hashlib.sha256(
                 (self.root / "base.pt").read_bytes()
             ).hexdigest(),
+            "candidates": [candidate],
         }
         (self.root / "selected_pilot.json").write_text(json.dumps(selection) + "\n")
 
@@ -2065,6 +2508,15 @@ class RealOrchestrationTests(unittest.TestCase):
         self.assertEqual(
             [entry["step"] for entry in run_report["validation_history"]], [2, 3]
         )
+        selected_record = next(
+            entry
+            for entry in run_report["validation_history"]
+            if entry["step"] == run_report["selected_step"]
+        )
+        self.assertEqual(selected_record["validation"], run_report["validation"])
+        self.assertEqual(selected_record["comparison"], run_report["comparison"])
+        self.assertEqual(selected_record["gate_checks"], run_report["gate_checks"])
+        self.assertTrue(all(run_report["gate_checks"].values()))
         self.assertTrue(np.isfinite(run_report["last_train_step"]["total_loss"]))
         self.assertTrue(run_report["passes_gates"])
         selection_log = next(

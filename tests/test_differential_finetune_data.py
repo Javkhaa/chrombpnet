@@ -224,6 +224,57 @@ class PairedContextDatasetTests(unittest.TestCase):
         self.assertIsNone(dataset._genome)
         self.assertIsNone(dataset._nuc_bws)
 
+    def test_open_rollback_attempts_all_closes_when_warnings_are_errors(self):
+        class Handle:
+            def __init__(self, *, fail=False):
+                self.fail = fail
+                self.close_attempted = False
+
+            def close(self):
+                self.close_attempted = True
+                if self.fail:
+                    raise OSError("injected close failure")
+
+        dataset = self._dataset()
+        genome = Handle()
+        first_bigwig = Handle(fail=True)
+        second_bigwig = Handle()
+        opens = iter(
+            (
+                first_bigwig,
+                second_bigwig,
+                OSError("injected BigWig open failure"),
+            )
+        )
+
+        def open_bigwig(_path):
+            result = next(opens)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with (
+            patch(
+                "chrombpnet.multitask.differential_finetune_data.pyfaidx.Fasta",
+                return_value=genome,
+            ),
+            patch(
+                "chrombpnet.multitask.differential_finetune_data.pyBigWig.open",
+                side_effect=open_bigwig,
+            ),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("error")
+            with self.assertRaisesRegex(OSError, "BigWig open"):
+                dataset._handles()
+
+        self.assertTrue(first_bigwig.close_attempted)
+        self.assertTrue(second_bigwig.close_attempted)
+        self.assertTrue(genome.close_attempted)
+        self.assertTrue(any("close failed" in str(item.message) for item in caught))
+        self.assertIsNone(dataset._genome)
+        self.assertIsNone(dataset._nuc_bws)
+
     def test_close_failure_warns_and_still_closes_remaining_handles(self):
         class Handle:
             def __init__(self, *, fail=False):
@@ -250,6 +301,35 @@ class PairedContextDatasetTests(unittest.TestCase):
         self.assertTrue(second_bigwig.close_attempted)
         self.assertTrue(genome.close_attempted)
         self.assertTrue(any("close" in str(item.message) for item in caught))
+        self.assertIsNone(dataset._genome)
+        self.assertIsNone(dataset._nuc_bws)
+
+    def test_normal_close_attempts_all_handles_when_warnings_are_errors(self):
+        class Handle:
+            def __init__(self, *, fail=False):
+                self.fail = fail
+                self.close_attempted = False
+
+            def close(self):
+                self.close_attempted = True
+                if self.fail:
+                    raise OSError("injected close failure")
+
+        dataset = self._dataset()
+        genome = Handle(fail=True)
+        first_bigwig = Handle(fail=True)
+        second_bigwig = Handle()
+        dataset._genome = genome
+        dataset._nuc_bws = {"first": first_bigwig, "second": second_bigwig}
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("error")
+            dataset.close()
+
+        self.assertTrue(first_bigwig.close_attempted)
+        self.assertTrue(second_bigwig.close_attempted)
+        self.assertTrue(genome.close_attempted)
+        self.assertEqual(len(caught), 2)
         self.assertIsNone(dataset._genome)
         self.assertIsNone(dataset._nuc_bws)
 
