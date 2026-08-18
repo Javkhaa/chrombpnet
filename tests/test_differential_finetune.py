@@ -131,5 +131,13 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
             rtol=0,
             atol=0,
         )
+        self.assertGreater(torch.count_nonzero(model.nuc_profile_b.grad[2]).item(), 0)
+        self.assertGreater(torch.count_nonzero(model.nuc_profile_b.grad[5]).item(), 0)
+        torch.testing.assert_close(
+            model.nuc_profile_b.grad[[0, 1, 3, 4]],
+            torch.zeros_like(model.nuc_profile_b.grad[[0, 1, 3, 4]]),
+            rtol=0,
+            atol=0,
+        )
         second_guard.teardown()
         second_guard.teardown()
