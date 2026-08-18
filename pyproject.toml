@@ -62,6 +62,7 @@ chrombpnet-train-multicell = "chrombpnet.multitask.train_multicell_torch:main"
 chrombpnet-eval-multitask = "chrombpnet.multitask.evaluate_multitask:main"
 chrombpnet-eval-multicell = "chrombpnet.multitask.evaluate_multicell:main"
 chrombpnet-call-diff-nucleosomes = "chrombpnet.multitask.differential_nucleosomes_runner:main"
+chrombpnet-finetune-diff-nucleosomes = "chrombpnet.multitask.fine_tune_differential_torch:main"
 chrombpnet-cfdna-poc = "chrombpnet.cfdna.run_poc:main"
 chrombpnet-cfdna-deconvolve = "chrombpnet.cfdna.deconvolve_real:main"
 
