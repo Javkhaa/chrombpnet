@@ -616,6 +616,10 @@ def _parse_differential_metrics(payload: object, label: str) -> dict[str, object
             raise ValueError(
                 f"{label}.counts.{endpoint}.expected does not match target rows"
             )
+        if endpoint == "average_precision" and eligible != expected:
+            raise ValueError(
+                f"{label}.counts.average_precision.eligible must equal expected"
+            )
         parsed_count = {
             "expected": expected,
             "eligible": eligible,
@@ -2142,6 +2146,24 @@ def _differential_coverage_matches(
         and isinstance(base_counts, dict)
         and isinstance(tuned_counts, dict)
         and base_counts == tuned_counts
+        and _average_precision_coverage_complete(base_counts)
+        and _average_precision_coverage_complete(tuned_counts)
+    )
+
+
+def _average_precision_coverage_complete(counts: Mapping[str, object]) -> bool:
+    average_precision = counts.get("average_precision")
+    if not isinstance(average_precision, dict):
+        return False
+    expected = average_precision.get("expected")
+    eligible = average_precision.get("eligible")
+    scored = average_precision.get("scored")
+    return bool(
+        all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in (expected, eligible, scored)
+        )
+        and expected == eligible == scored
     )
 
 

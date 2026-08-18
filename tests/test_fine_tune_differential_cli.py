@@ -769,6 +769,24 @@ class PreservationGateTests(unittest.TestCase):
         mismatched["counts"] = mismatched_counts
         self.assertFalse(passes_gates(self.base, mismatched))
 
+    def test_requires_all_ap_rows_but_allows_shift_eligibility_subset(self):
+        base = copy.deepcopy(self.base)
+        tuned = copy.deepcopy(self.base)
+        tuned.update(
+            accessibility_unchanged=True,
+            non_adult_unchanged=True,
+            profile_bias_unchanged=True,
+        )
+        for metrics in (base, tuned):
+            for endpoint in ("shift_direction_accuracy", "shift_mae_bp"):
+                metrics["counts"][endpoint].update(eligible=2, scored=2)
+
+        self.assertTrue(passes_gates(base, tuned))
+
+        for metrics in (base, tuned):
+            metrics["counts"]["average_precision"].update(eligible=3, scored=3)
+        self.assertFalse(passes_gates(base, tuned))
+
     def test_load_selected_lambda_requires_a_passing_selection(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             checkpoint = Path(temporary_directory) / "base.pt"
@@ -1691,6 +1709,20 @@ class ValidationReportBindingTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 self._assert_rejected_before_data(payload, "selected.*match|counts")
+
+    def test_ap_eligibility_below_expected_is_rejected_before_data_load(self):
+        payload = self._payload()
+        for evidence in (payload, payload["validation_history"][0]):
+            for metrics in (
+                evidence["validation"],
+                evidence["comparison"]["base"]["differential"],
+                evidence["comparison"]["tuned"]["differential"],
+            ):
+                metrics["counts"]["average_precision"].update(eligible=3, scored=3)
+
+        self._assert_rejected_before_data(
+            payload, "average_precision.*eligible|AP.*eligible"
+        )
 
     def test_forged_selected_pilot_candidate_is_rejected_before_data_load(self):
         forged_report = self._candidate_report_payload()
