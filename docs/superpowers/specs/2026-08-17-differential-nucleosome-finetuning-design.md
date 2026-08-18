@@ -80,16 +80,15 @@ with gradient accumulation rather than dropping members from large contexts.
 Fine-tuning starts from the selected `HybridMultiCellModel` checkpoint and preserves
 the checkpoint's complete 346-cell ordering.
 
-Stage 1 trains only adult rows of:
-
-- `nuc_profile_w`;
-- `nuc_profile_b`.
+Stage 1 trains only adult rows of `nuc_profile_w`. The scalar
+`nuc_profile_b` adds the same offset at every profile position and is therefore
+softmax-invariant; every bias row remains frozen and is checked bitwise.
 
 The shared convolutional trunk, cell embeddings, FiLM layers, accessibility head,
-and nucleosome count parameters remain frozen. Non-adult rows in the stacked
-nucleosome profile parameters are protected by an explicit gradient mask and a
-zero-weight-decay optimizer group. A post-step invariant verifies that frozen rows
-are bitwise unchanged.
+and nucleosome count parameters remain frozen. Non-adult `nuc_profile_w` rows are
+protected by an explicit gradient mask and a zero-weight-decay optimizer group. A
+post-step invariant verifies that non-adult weight rows and all bias rows are
+bitwise unchanged.
 
 Stage 1 is the only implementation in this scope. Unfreezing FiLM or late trunk
 layers requires a separate experiment and approval after the heads-only result is

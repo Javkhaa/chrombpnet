@@ -173,13 +173,11 @@ uv run chrombpnet-call-diff-nucleosomes \
   --min-lineage-comparators 3 --chunk-size 32 --cache-loci 100
 ```
 
-Run the three-lambda pilot from the original hybrid checkpoint. The first sweep in
-`diffnuc_finetune/pilot` is archived as invalid because CUDA AMP kept the profile
-forward in reduced precision and exposed unstable Pearson behavior. It is retained
-for provenance and is not scientific selection evidence. The corrected
-implementation reran the unchanged three-lambda protocol into `pilot_ampfix`; all
-24 candidate-step gate checks passed, and lambda 4.0 at step 2,000 was selected.
-The command below reflects that corrected run:
+Run the three-lambda pilot from the original hybrid checkpoint. Preserve the
+existing `pilot`, `pilot_ampfix`, and `final` directories byte-identically as
+superseded audit evidence. After code approval, the corrected pooled-metric sweep
+must write to `pilot_metricfix`. CUDA `--amp` and GradScaler remain requested, but
+all model forwards are forced to float32 to preserve profile-logit resolution.
 
 ```bash
 uv run chrombpnet-finetune-diff-nucleosomes train \
@@ -191,11 +189,12 @@ uv run chrombpnet-finetune-diff-nucleosomes train \
   --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
   --train-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train/differential_nucleosomes.parquet \
   --valid-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid/differential_nucleosomes.parquet \
-  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot_ampfix \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot_metricfix \
   --lambda-dev-grid 0.25 1.0 4.0 --pilot-steps 2000 --full-steps 0 \
   --learning-rate 1e-5 --warmup-steps 100 --grad-clip 1.0 \
   --validate-every 250 --seed 0 --device cuda --amp \
-  --wandb --wandb-project jg_experiments --wandb-run-name hybrid346_diffnuc_pilot
+  --wandb --wandb-project jg_experiments \
+  --wandb-run-name hybrid346_diffnuc_pilot_metricfix
 ```
 
 After the pilot selects a passing lambda, restart the full run from the base checkpoint:
@@ -210,23 +209,25 @@ uv run chrombpnet-finetune-diff-nucleosomes train \
   --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
   --train-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train/differential_nucleosomes.parquet \
   --valid-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid/differential_nucleosomes.parquet \
-  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final \
-  --selected-pilot-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot_ampfix/selected_pilot.json \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final_metricfix \
+  --selected-pilot-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot_metricfix/selected_pilot.json \
   --pilot-steps 0 --full-steps 10000 --learning-rate 1e-5 \
   --warmup-steps 100 --grad-clip 1.0 --validate-every 250 \
   --seed 0 --device cuda --amp --wandb --wandb-project jg_experiments \
-  --wandb-run-name hybrid346_diffnuc_final
+  --wandb-run-name hybrid346_diffnuc_final_metricfix
 ```
 
 The existing 553 test loci in
 `/mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_pilot_rescore/differential_nucleosomes.parquet`
 are rejected by the `train` subcommand. They are accepted only by
-`evaluate --split test`, after final validation gates pass:
+`evaluate --split test`, after final validation gates pass. This post-fix use is a
+documented corrective re-evaluation, not a new untouched evaluation:
 
 ```bash
 uv run chrombpnet-finetune-diff-nucleosomes evaluate \
   --base-checkpoint /mnt/data/jganbat/scatac_corpus/run/model_346_hybrid_long.pt \
-  --tuned-checkpoint /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/final.pt \
+  --tuned-checkpoint /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final_metricfix/final.pt \
+  --validation-report /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final_metricfix/final_validation.json \
   --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
   --manifest-root /mnt/data/jganbat/scatac_corpus/staged \
   --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
@@ -234,11 +235,17 @@ uv run chrombpnet-finetune-diff-nucleosomes evaluate \
   --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
   --calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_pilot_rescore/differential_nucleosomes.parquet \
   --split test \
-  --out-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/test_comparison.json \
+  --out-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final_metricfix/corrective_test_comparison.json \
   --device cuda --amp
 ```
 
 ## Fine-tuning outcome
+
+> **Superseded audit evidence:** The results below came from the preserved
+> `pilot_ampfix` and `final` artifacts. Their context-weighted effect and shift
+> summaries did not implement pooled eligible-row metrics. Do not use them as the
+> corrected scientific result; regenerate evidence under `pilot_metricfix` and
+> `final_metricfix` after code approval.
 
 The corrected selector supplied lambda 4.0 and provenance only. The 10,000-step
 full run restarted model weights from the original

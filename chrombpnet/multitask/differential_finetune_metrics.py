@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -16,8 +17,40 @@ from chrombpnet.multitask.differential_nucleosomes import (
 
 
 @dataclass(frozen=True)
+class DifferentialEndpointInputs:
+    """Per-row values needed to score every differential endpoint."""
+
+    deviation_pearsons: tuple[float, ...]
+    deviation_eligible: tuple[bool, ...]
+    predicted_effects: tuple[float, ...]
+    observed_effects: tuple[float, ...]
+    predicted_shifts: tuple[float, ...]
+    observed_shifts: tuple[float, ...]
+    predicted_robust_z: tuple[float, ...]
+    observed_calls: tuple[bool, ...]
+
+    def __post_init__(self) -> None:
+        lengths = {
+            len(self.deviation_pearsons),
+            len(self.deviation_eligible),
+            len(self.predicted_effects),
+            len(self.observed_effects),
+            len(self.predicted_shifts),
+            len(self.observed_shifts),
+            len(self.predicted_robust_z),
+            len(self.observed_calls),
+        }
+        if len(lengths) != 1:
+            raise ValueError("differential endpoint inputs must align by target row")
+
+    @property
+    def expected_rows(self) -> int:
+        return len(self.observed_calls)
+
+
+@dataclass(frozen=True)
 class DifferentialMetrics:
-    """Agreement between predicted and observed differential profiles."""
+    """Agreement and row coverage for differential profile endpoints."""
 
     deviation_pearson: float
     effect_spearman: float
@@ -25,6 +58,96 @@ class DifferentialMetrics:
     shift_mae_bp: float
     average_precision: float
     target_locus_rows: int
+    counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    coverage_complete: bool = False
+    endpoint_inputs: DifferentialEndpointInputs | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    @classmethod
+    def from_endpoint_inputs(
+        cls, inputs: DifferentialEndpointInputs
+    ) -> DifferentialMetrics:
+        expected = inputs.expected_rows
+        deviation = np.asarray(inputs.deviation_pearsons, dtype=np.float64)
+        deviation_eligible = np.asarray(inputs.deviation_eligible, dtype=bool)
+        deviation_scored = deviation_eligible & np.isfinite(deviation)
+
+        predicted_effect = np.asarray(inputs.predicted_effects, dtype=np.float64)
+        observed_effect = np.asarray(inputs.observed_effects, dtype=np.float64)
+        effect_eligible = np.isfinite(observed_effect)
+        effect_scored = effect_eligible & np.isfinite(predicted_effect)
+
+        predicted_shift = np.asarray(inputs.predicted_shifts, dtype=np.float64)
+        observed_shift = np.asarray(inputs.observed_shifts, dtype=np.float64)
+        shift_eligible = np.isfinite(observed_shift) & (np.abs(observed_shift) >= 10)
+        shift_scored = shift_eligible & np.isfinite(predicted_shift)
+
+        predicted_robust_z = np.asarray(inputs.predicted_robust_z, dtype=np.float64)
+        observed_calls = np.asarray(inputs.observed_calls, dtype=bool)
+        ranking_eligible = np.ones(expected, dtype=bool)
+        ranking_scored = np.isfinite(predicted_robust_z)
+
+        if shift_scored.any():
+            shift_direction_accuracy = float(
+                (
+                    np.sign(predicted_shift[shift_scored])
+                    == np.sign(observed_shift[shift_scored])
+                ).mean()
+            )
+            shift_mae_bp = float(
+                np.abs(
+                    predicted_shift[shift_scored] - observed_shift[shift_scored]
+                ).mean()
+            )
+        else:
+            shift_direction_accuracy = float("nan")
+            shift_mae_bp = float("nan")
+
+        counts = {
+            "deviation_pearson": _endpoint_counts(
+                expected, deviation_eligible, deviation_scored
+            ),
+            "effect_spearman": _endpoint_counts(
+                expected, effect_eligible, effect_scored
+            ),
+            "shift_direction_accuracy": _endpoint_counts(
+                expected, shift_eligible, shift_scored
+            ),
+            "shift_mae_bp": _endpoint_counts(expected, shift_eligible, shift_scored),
+            "average_precision": {
+                **_endpoint_counts(expected, ranking_eligible, ranking_scored),
+                "positives": int(observed_calls.sum()),
+            },
+        }
+        return cls(
+            deviation_pearson=_mean_defined(deviation[deviation_scored]),
+            effect_spearman=_spearman(
+                predicted_effect[effect_scored], observed_effect[effect_scored]
+            ),
+            shift_direction_accuracy=shift_direction_accuracy,
+            shift_mae_bp=shift_mae_bp,
+            average_precision=_average_precision(
+                predicted_robust_z[ranking_scored],
+                observed_calls[ranking_scored],
+            ),
+            target_locus_rows=expected,
+            counts=counts,
+            coverage_complete=all(
+                values["eligible"] == values["scored"] for values in counts.values()
+            ),
+            endpoint_inputs=inputs,
+        )
+
+
+def _endpoint_counts(
+    expected: int, eligible: np.ndarray, scored: np.ndarray
+) -> dict[str, int]:
+    return {
+        "expected": expected,
+        "eligible": int(eligible.sum()),
+        "scored": int(scored.sum()),
+    }
 
 
 @dataclass(frozen=True)
@@ -95,7 +218,12 @@ def _mean_defined(values: np.ndarray) -> float:
 def _shift_if_defined(
     target: np.ndarray, consensus: np.ndarray, max_shift: int
 ) -> float:
-    if np.std(target) == 0 or np.std(consensus) == 0:
+    if (
+        not np.isfinite(target).all()
+        or not np.isfinite(consensus).all()
+        or np.std(target) == 0
+        or np.std(consensus) == 0
+    ):
         return float("nan")
     return float(estimate_shift(target, consensus, max_shift))
 
@@ -131,8 +259,11 @@ def _normalized_context_profiles(
     center_slice: slice,
     sigma: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    predicted_crop = _softmax(predicted_logits)[:, center_slice]
     observed_crop = observed_raw[:, center_slice]
+    if np.isfinite(predicted_logits).all():
+        predicted_crop = _softmax(predicted_logits)[:, center_slice]
+    else:
+        predicted_crop = np.full_like(observed_crop, np.nan, dtype=np.float64)
     if predicted_crop.shape[1] == 0:
         raise ValueError("center_slice must select at least one position")
     _, predicted_profiles = normalize_profiles(predicted_crop, sigma)
@@ -225,14 +356,26 @@ def score_context_predictions(
         raise ValueError("predicted_logits and observed_raw must have matching shapes")
     if observed_calls.shape != (predicted_logits.shape[0],):
         raise ValueError("observed_calls must have one value per target cell")
-    if not np.isfinite(predicted_logits).all() or not np.isfinite(observed_raw).all():
-        raise ValueError("predicted_logits and observed_raw must be finite")
+    if not np.isfinite(observed_raw).all():
+        raise ValueError("observed_raw must be finite")
 
     target_locus_rows = predicted_logits.shape[0]
     if target_locus_rows < 2:
-        undefined = float("nan")
-        return DifferentialMetrics(
-            undefined, undefined, undefined, undefined, undefined, target_locus_rows
+        return DifferentialMetrics.from_endpoint_inputs(
+            DifferentialEndpointInputs(
+                deviation_pearsons=tuple(
+                    float("nan") for _ in range(target_locus_rows)
+                ),
+                deviation_eligible=tuple(False for _ in range(target_locus_rows)),
+                predicted_effects=tuple(float("nan") for _ in range(target_locus_rows)),
+                observed_effects=tuple(float("nan") for _ in range(target_locus_rows)),
+                predicted_shifts=tuple(float("nan") for _ in range(target_locus_rows)),
+                observed_shifts=tuple(float("nan") for _ in range(target_locus_rows)),
+                predicted_robust_z=tuple(
+                    float("nan") for _ in range(target_locus_rows)
+                ),
+                observed_calls=tuple(bool(value) for value in observed_calls),
+            )
         )
 
     predicted_profiles, observed_profiles = _normalized_context_profiles(
@@ -243,13 +386,19 @@ def score_context_predictions(
         predicted_profiles
     )
     observed_deviation, observed_consensus = _leave_one_out_deviation(observed_profiles)
-    deviation_pearson = _mean_defined(
-        np.asarray(
-            [
-                _pearson(predicted_deviation[index], observed_deviation[index])
-                for index in range(target_locus_rows)
-            ]
-        )
+    deviation_pearsons = np.asarray(
+        [
+            _pearson(predicted_deviation[index], observed_deviation[index])
+            for index in range(target_locus_rows)
+        ]
+    )
+    deviation_eligible = np.asarray(
+        [
+            math.isfinite(
+                _pearson(observed_deviation[index], observed_deviation[index])
+            )
+            for index in range(target_locus_rows)
+        ]
     )
 
     predicted_effect = np.asarray(
@@ -264,8 +413,6 @@ def score_context_predictions(
             for index in range(target_locus_rows)
         ]
     )
-    effect_spearman = _spearman(predicted_effect, observed_effect)
-
     predicted_shift = np.asarray(
         [
             _shift_if_defined(
@@ -282,32 +429,16 @@ def score_context_predictions(
             for index in range(target_locus_rows)
         ]
     )
-    shift_rows = (
-        np.isfinite(predicted_shift)
-        & np.isfinite(observed_shift)
-        & (np.abs(observed_shift) >= 10)
-    )
-    if shift_rows.any():
-        shift_direction_accuracy = float(
-            (
-                np.sign(predicted_shift[shift_rows])
-                == np.sign(observed_shift[shift_rows])
-            ).mean()
+    ranking_inputs = _ranking_inputs_from_profiles(predicted_profiles, observed_calls)
+    return DifferentialMetrics.from_endpoint_inputs(
+        DifferentialEndpointInputs(
+            deviation_pearsons=tuple(float(value) for value in deviation_pearsons),
+            deviation_eligible=tuple(bool(value) for value in deviation_eligible),
+            predicted_effects=tuple(float(value) for value in predicted_effect),
+            observed_effects=tuple(float(value) for value in observed_effect),
+            predicted_shifts=tuple(float(value) for value in predicted_shift),
+            observed_shifts=tuple(float(value) for value in observed_shift),
+            predicted_robust_z=ranking_inputs.predicted_robust_z,
+            observed_calls=ranking_inputs.observed_calls,
         )
-        shift_mae_bp = float(
-            np.abs(predicted_shift[shift_rows] - observed_shift[shift_rows]).mean()
-        )
-    else:
-        shift_direction_accuracy = float("nan")
-        shift_mae_bp = float("nan")
-
-    return DifferentialMetrics(
-        deviation_pearson=deviation_pearson,
-        effect_spearman=effect_spearman,
-        shift_direction_accuracy=shift_direction_accuracy,
-        shift_mae_bp=shift_mae_bp,
-        average_precision=pooled_average_precision(
-            (_ranking_inputs_from_profiles(predicted_profiles, observed_calls),)
-        ),
-        target_locus_rows=target_locus_rows,
     )

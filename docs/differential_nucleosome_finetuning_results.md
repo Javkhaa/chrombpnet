@@ -1,5 +1,14 @@
 # Differential nucleosome fine-tuning results
 
+> **Superseded audit evidence:** The `pilot_ampfix` and `final` scientific JSON
+> summarized below used context-weighted effect and shift metrics rather than
+> pooled eligible-row metrics. The artifacts and tables are preserved unchanged
+> for audit history, but they are not corrected scientific evidence. After code
+> approval, rerun the exact sweep into `pilot_metricfix`, restart the exact
+> 10,000-step final from the original base into `final_metricfix`, and perform one
+> clearly labeled corrective challenge re-evaluation bound to the passing
+> `final_metricfix/final_validation.json`.
+
 ## Scope
 
 This experiment fine-tuned only the 244 adult rows of the hybrid model's

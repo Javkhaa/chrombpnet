@@ -3,7 +3,9 @@ from __future__ import annotations
 import pickle
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import polars as pl
@@ -184,6 +186,72 @@ class PairedContextDatasetTests(unittest.TestCase):
         self.assertIsNot(dataset._nuc_bws, old_handles)
         self.assertIsNotNone(dataset._genome)
         self.assertIsNotNone(dataset._nuc_bws)
+
+    def test_partial_bigwig_open_failure_closes_every_acquired_handle(self):
+        class Handle:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        dataset = self._dataset()
+        genome = Handle()
+        first_bigwig = Handle()
+        opens = iter((first_bigwig, OSError("injected BigWig open failure")))
+
+        def open_bigwig(_path):
+            result = next(opens)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with (
+            patch(
+                "chrombpnet.multitask.differential_finetune_data.pyfaidx.Fasta",
+                return_value=genome,
+            ),
+            patch(
+                "chrombpnet.multitask.differential_finetune_data.pyBigWig.open",
+                side_effect=open_bigwig,
+            ),
+            self.assertRaisesRegex(OSError, "BigWig open"),
+        ):
+            dataset._handles()
+
+        self.assertTrue(genome.closed)
+        self.assertTrue(first_bigwig.closed)
+        self.assertIsNone(dataset._genome)
+        self.assertIsNone(dataset._nuc_bws)
+
+    def test_close_failure_warns_and_still_closes_remaining_handles(self):
+        class Handle:
+            def __init__(self, *, fail=False):
+                self.fail = fail
+                self.close_attempted = False
+
+            def close(self):
+                self.close_attempted = True
+                if self.fail:
+                    raise OSError("injected close failure")
+
+        dataset = self._dataset()
+        genome = Handle()
+        first_bigwig = Handle(fail=True)
+        second_bigwig = Handle()
+        dataset._genome = genome
+        dataset._nuc_bws = {"first": first_bigwig, "second": second_bigwig}
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dataset.close()
+
+        self.assertTrue(first_bigwig.close_attempted)
+        self.assertTrue(second_bigwig.close_attempted)
+        self.assertTrue(genome.close_attempted)
+        self.assertTrue(any("close" in str(item.message) for item in caught))
+        self.assertIsNone(dataset._genome)
+        self.assertIsNone(dataset._nuc_bws)
 
 
 class ContextBalancedSamplerTests(unittest.TestCase):

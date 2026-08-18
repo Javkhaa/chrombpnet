@@ -105,7 +105,7 @@ class AdultProfileHeadGuard:
     def make_optimizer(self, lr: float) -> torch.optim.Optimizer:
         """Create the only permitted optimizer for this fine-tuning phase."""
         return torch.optim.AdamW(
-            [self.profile_w, self.profile_b],
+            [self.profile_w],
             lr=lr,
             weight_decay=0.0,
         )
@@ -116,10 +116,8 @@ class AdultProfileHeadGuard:
             self.frozen_w, self.profile_w.detach()[self.non_adult_indices]
         ):
             raise AssertionError("frozen nuc_profile_w rows changed")
-        if not torch.equal(
-            self.frozen_b, self.profile_b.detach()[self.non_adult_indices]
-        ):
-            raise AssertionError("frozen nuc_profile_b rows changed")
+        if not torch.equal(self.frozen_b, self.profile_b.detach()):
+            raise AssertionError("frozen nuc_profile_b changed")
 
     def teardown(self) -> None:
         """Remove this guard's gradient hooks exactly once."""
@@ -171,7 +169,6 @@ def configure_adult_profile_finetune(model, adult_indices) -> AdultProfileHeadGu
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     profile_w.requires_grad_(True)
-    profile_b.requires_grad_(True)
 
     adult_mask = torch.zeros(
         profile_w.shape[0], dtype=torch.bool, device=profile_w.device
@@ -180,17 +177,14 @@ def configure_adult_profile_finetune(model, adult_indices) -> AdultProfileHeadGu
     non_adult_indices = torch.arange(profile_w.shape[0], device=profile_w.device)[
         ~adult_mask
     ]
-    gradient_hooks = (
-        profile_w.register_hook(_row_gradient_mask(adult_mask)),
-        profile_b.register_hook(_row_gradient_mask(adult_mask)),
-    )
+    gradient_hooks = (profile_w.register_hook(_row_gradient_mask(adult_mask)),)
     guard = AdultProfileHeadGuard(
         model=model,
         profile_w=profile_w,
         profile_b=profile_b,
         non_adult_indices=non_adult_indices,
         frozen_w=profile_w.detach()[non_adult_indices].clone(),
-        frozen_b=profile_b.detach()[non_adult_indices].clone(),
+        frozen_b=profile_b.detach().clone(),
         gradient_hooks=gradient_hooks,
     )
     setattr(model, _MODEL_GUARD_ATTRIBUTE, guard)

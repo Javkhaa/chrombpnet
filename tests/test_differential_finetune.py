@@ -67,15 +67,14 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
         parameter_ids = {
             id(parameter) for parameter in optimizer.param_groups[0]["params"]
         }
-        self.assertEqual(
-            parameter_ids, {id(model.nuc_profile_w), id(model.nuc_profile_b)}
-        )
+        self.assertEqual(parameter_ids, {id(model.nuc_profile_w)})
         self.assertEqual(optimizer.param_groups[0]["weight_decay"], 0.0)
+        self.assertFalse(model.nuc_profile_b.requires_grad)
         self.assertTrue(
             all(
                 not parameter.requires_grad
                 for name, parameter in model.named_parameters()
-                if name not in {"nuc_profile_w", "nuc_profile_b"}
+                if name != "nuc_profile_w"
             )
         )
 
@@ -83,6 +82,7 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
         _, _, logits, _ = model(sequence, torch.tensor([1, 4]))
         loss = F.cross_entropy(logits, torch.tensor([5, 15]))
         loss.backward()
+        self.assertIsNone(model.nuc_profile_b.grad)
         torch.testing.assert_close(
             model.nuc_profile_w.grad[[0, 2, 3, 5]],
             torch.zeros_like(model.nuc_profile_w.grad[[0, 2, 3, 5]]),
@@ -98,9 +98,7 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
         torch.testing.assert_close(
             before_w[[0, 2, 3, 5]], model.nuc_profile_w[[0, 2, 3, 5]], rtol=0, atol=0
         )
-        torch.testing.assert_close(
-            before_b[[0, 2, 3, 5]], model.nuc_profile_b[[0, 2, 3, 5]], rtol=0, atol=0
-        )
+        torch.testing.assert_close(before_b, model.nuc_profile_b, rtol=0, atol=0)
 
     def test_teardown_and_reconfiguration_replace_prior_gradient_masks(self):
         torch.manual_seed(11)
@@ -131,13 +129,6 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
             rtol=0,
             atol=0,
         )
-        self.assertGreater(torch.count_nonzero(model.nuc_profile_b.grad[2]).item(), 0)
-        self.assertGreater(torch.count_nonzero(model.nuc_profile_b.grad[5]).item(), 0)
-        torch.testing.assert_close(
-            model.nuc_profile_b.grad[[0, 1, 3, 4]],
-            torch.zeros_like(model.nuc_profile_b.grad[[0, 1, 3, 4]]),
-            rtol=0,
-            atol=0,
-        )
+        self.assertIsNone(model.nuc_profile_b.grad)
         second_guard.teardown()
         second_guard.teardown()

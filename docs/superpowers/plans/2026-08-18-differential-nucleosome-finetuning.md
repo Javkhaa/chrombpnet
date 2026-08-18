@@ -16,7 +16,8 @@
 - Use `chr8` and `chr20` only for validation and checkpoint selection.
 - Use the remaining chromosomes listed in `refs/folds/fold_0.json` for fine-tuning.
 - Preserve the checkpoint's complete 346-cell ordering; map the 244 adult rows by exact `cell_type` string.
-- Train only adult rows of `nuc_profile_w` and `nuc_profile_b` in Stage 1.
+- Train only adult rows of `nuc_profile_w`; preserve every `nuc_profile_b` row
+  bitwise because the scalar profile bias is softmax-invariant.
 - Keep the caller's 501 bp differential window; fetch the checkpoint's full 1,000 bp target for profile NLL and use a renormalized central 501 bp crop for deviation loss and differential metrics.
 - Use observed BigWig profiles as supervision; z-scores, shifts, and call flags select or evaluate examples but are not direct regression targets.
 - Do not overwrite the base checkpoint, adult call artifacts, or existing run outputs.
@@ -406,13 +407,17 @@ Instantiate a tiny `HybridMultiCellModel` with six cells and adult indices `[1, 
 self.assertFalse(torch.equal(before_w[1], model.nuc_profile_w[1]))
 self.assertFalse(torch.equal(before_w[4], model.nuc_profile_w[4]))
 torch.testing.assert_close(before_w[[0, 2, 3, 5]], model.nuc_profile_w[[0, 2, 3, 5]], rtol=0, atol=0)
-torch.testing.assert_close(before_b[[0, 2, 3, 5]], model.nuc_profile_b[[0, 2, 3, 5]], rtol=0, atol=0)
-self.assertTrue(all(not p.requires_grad for name, p in model.named_parameters() if name not in {"nuc_profile_w", "nuc_profile_b"}))
+torch.testing.assert_close(before_b, model.nuc_profile_b, rtol=0, atol=0)
+self.assertTrue(all(not p.requires_grad for name, p in model.named_parameters() if name != "nuc_profile_w"))
 ```
 
 - [ ] **Step 6: Implement gradient masks and frozen-row guard**
 
-`configure_adult_profile_finetune` freezes every parameter, enables the two profile parameters, registers row-mask gradient hooks, and snapshots non-adult rows. `AdultProfileHeadGuard.assert_unchanged()` performs bitwise `torch.equal` checks after optimizer steps. The optimizer must receive only the two profile parameters and use zero weight decay.
+`configure_adult_profile_finetune` freezes every parameter, enables
+`nuc_profile_w`, registers its adult-row gradient mask, and snapshots non-adult
+weight rows plus the complete bias tensor. `AdultProfileHeadGuard.assert_unchanged()`
+performs bitwise `torch.equal` checks after optimizer steps. The optimizer must
+receive only `nuc_profile_w` and use zero weight decay.
 
 - [ ] **Step 7: Verify Task 3**
 
@@ -763,6 +768,9 @@ No Git commit is created for NFS outputs.
 
 ### Task 8: Run The Three-Lambda Bounded Pilot
 
+> Historical execution record. The final-review correction protocol below
+> supersedes these runtime paths without modifying their artifacts.
+
 **Files:**
 - Write NFS outputs: `/mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot/`
 
@@ -807,6 +815,9 @@ No Git commit is created for run outputs.
 
 ### Task 9: Run The Selected Full Fine-Tune And Untouched Test Evaluation
 
+> Historical execution record. Any post-fix challenge use is a corrective
+> re-evaluation, not a new untouched evaluation.
+
 **Files:**
 - Write NFS outputs: `/mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/`
 - Modify: `docs/adult_differential_nucleosomes.md`
@@ -846,6 +857,7 @@ Require the final selected checkpoint to pass all ordinary-profile, accessibilit
 uv run chrombpnet-finetune-diff-nucleosomes evaluate \
   --base-checkpoint /mnt/data/jganbat/scatac_corpus/run/model_346_hybrid_long.pt \
   --tuned-checkpoint /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/final.pt \
+  --validation-report /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/final_validation.json \
   --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
   --manifest-root /mnt/data/jganbat/scatac_corpus/staged \
   --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
@@ -882,3 +894,21 @@ Expected: all tests and checks pass; the final JSON reports exist and contain fi
 git add docs/differential_nucleosome_finetuning_results.md docs/adult_differential_nucleosomes.md
 git commit -m "docs: report differential nucleosome fine-tuning"
 ```
+
+## Final-Review Scientific Correction Protocol
+
+Preserve `diffnuc_finetune/pilot`, `pilot_ampfix`, and `final` byte-identically
+as superseded audit evidence. After code approval, rerun the exact three-lambda
+sweep from the original base checkpoint into `pilot_metricfix`. If and only if
+that selector passes, restart the exact 10,000-step configuration from the original
+base checkpoint into `final_metricfix`, consuming only
+`pilot_metricfix/selected_pilot.json`. Then run the challenge evaluation once as
+a documented corrective re-evaluation, with
+`final_metricfix/final_validation.json` supplied through the required
+`--validation-report` binding.
+
+The CUDA commands continue to request `--amp`/GradScaler, but every model forward
+is forced to float32 to preserve profile-logit resolution. Candidate, final, and
+evaluation schema-v2 JSON must contain pooled endpoint counts, exact checkpoint
+hashes, and protocol bindings; prior JSON without these fields is not accepted for
+the corrective evaluation.

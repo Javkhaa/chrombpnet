@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -183,30 +184,56 @@ class PairedContextDataset(Dataset):
         return len(self.units)
 
     def _handles(self):
-        if self._genome is None:
-            self._genome = pyfaidx.Fasta(self.genome_fasta)
-        if self._nuc_bws is None:
-            needed = {cell for unit in self.units for cell in unit.cell_types}
-            missing = sorted(needed.difference(self.nuc_bw_files))
-            if missing:
-                raise ValueError(
-                    f"missing nucleosome BigWigs for cell types: {missing}"
-                )
-            self._nuc_bws = {
-                cell: pyBigWig.open(self.nuc_bw_files[cell]) for cell in needed
-            }
+        if self._genome is not None and self._nuc_bws is not None:
+            return self._genome, self._nuc_bws
+        if self._genome is not None or self._nuc_bws is not None:
+            self.close()
+
+        needed = {cell for unit in self.units for cell in unit.cell_types}
+        missing = sorted(needed.difference(self.nuc_bw_files))
+        if missing:
+            raise ValueError(f"missing nucleosome BigWigs for cell types: {missing}")
+        genome = None
+        bigwigs = {}
+        try:
+            genome = pyfaidx.Fasta(self.genome_fasta)
+            for cell in sorted(needed):
+                bigwigs[cell] = pyBigWig.open(self.nuc_bw_files[cell])
+        except Exception:
+            self._close_handles(genome, bigwigs)
+            raise
+        self._genome = genome
+        self._nuc_bws = bigwigs
         return self._genome, self._nuc_bws
+
+    @staticmethod
+    def _close_handles(genome, bigwigs) -> None:
+        if bigwigs is not None:
+            for label, bigwig in bigwigs.items():
+                try:
+                    bigwig.close()
+                except Exception as error:  # noqa: BLE001 - close all owned handles
+                    warnings.warn(
+                        f"BigWig close failed for {label}: {error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+        if genome is not None:
+            try:
+                genome.close()
+            except Exception as error:  # noqa: BLE001 - close all owned handles
+                warnings.warn(
+                    f"FASTA close failed: {error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def close(self) -> None:
         """Close lazy FASTA and BigWig handles and allow later reopening."""
         genome, bigwigs = self._genome, self._nuc_bws
         self._genome = None
         self._nuc_bws = None
-        if bigwigs is not None:
-            for bigwig in bigwigs.values():
-                bigwig.close()
-        if genome is not None:
-            genome.close()
+        self._close_handles(genome, bigwigs)
 
     def __getstate__(self):
         state = self.__dict__.copy()

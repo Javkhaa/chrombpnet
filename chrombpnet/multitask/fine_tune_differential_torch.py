@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import tempfile
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -30,11 +32,9 @@ from chrombpnet.multitask.differential_finetune_data import (
     validate_artifact_chromosomes,
 )
 from chrombpnet.multitask.differential_finetune_metrics import (
+    DifferentialEndpointInputs,
     DifferentialMetrics,
-    DifferentialRankingInputs,
-    pooled_average_precision,
     score_context_predictions,
-    score_context_ranking_inputs,
 )
 from chrombpnet.multitask.differential_nucleosomes import validate_adult_cohort
 from chrombpnet.multitask.differential_nucleosomes_runner import (
@@ -74,6 +74,7 @@ APPROVED_TRAIN_CHROMOSOMES = frozenset(
 APPROVED_VALID_CHROMOSOMES = frozenset({"chr8", "chr20"})
 APPROVED_TEST_CHROMOSOMES = frozenset({"chr1", "chr3", "chr6"})
 APPROVED_PILOT_LAMBDAS = (0.25, 1.0, 4.0)
+REPORT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,8 @@ class FineTuneConfig:
     wandb: bool = False
     wandb_project: str = "jg_experiments"
     wandb_run_name: str | None = None
+    run_protocol: str = "single_run"
+    selected_pilot_json: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -392,32 +395,37 @@ def validate_call_splits(
 
 def aggregate_differential_metrics(
     metrics: list[DifferentialMetrics],
-    ranking_inputs: list[DifferentialRankingInputs],
-) -> dict[str, float | int]:
-    """Weight context metrics by target rows and pool AP over every target row."""
-    if len(metrics) != len(ranking_inputs):
-        raise ValueError("differential metrics and ranking inputs must align")
-    total_rows = sum(metric.target_locus_rows for metric in metrics)
+) -> dict[str, object]:
+    """Pool per-row endpoint inputs once across every eligible context row."""
+    inputs = [metric.endpoint_inputs for metric in metrics]
+    if any(item is None for item in inputs):
+        raise ValueError("differential metrics are missing row-level endpoint inputs")
 
-    def weighted(name: str) -> float:
-        pairs = [
-            (float(getattr(metric, name)), metric.target_locus_rows)
-            for metric in metrics
-            if math.isfinite(float(getattr(metric, name)))
-        ]
-        denominator = sum(weight for _, weight in pairs)
-        if denominator == 0:
-            return float("nan")
-        return sum(value * weight for value, weight in pairs) / denominator
+    def concatenate(name: str):
+        return tuple(value for item in inputs for value in getattr(item, name))
 
+    pooled = DifferentialMetrics.from_endpoint_inputs(
+        DifferentialEndpointInputs(
+            deviation_pearsons=concatenate("deviation_pearsons"),
+            deviation_eligible=concatenate("deviation_eligible"),
+            predicted_effects=concatenate("predicted_effects"),
+            observed_effects=concatenate("observed_effects"),
+            predicted_shifts=concatenate("predicted_shifts"),
+            observed_shifts=concatenate("observed_shifts"),
+            predicted_robust_z=concatenate("predicted_robust_z"),
+            observed_calls=concatenate("observed_calls"),
+        )
+    )
     return {
-        "deviation_pearson": weighted("deviation_pearson"),
-        "effect_spearman": weighted("effect_spearman"),
-        "shift_direction_accuracy": weighted("shift_direction_accuracy"),
-        "shift_mae_bp": weighted("shift_mae_bp"),
-        "average_precision": pooled_average_precision(ranking_inputs),
-        "target_locus_rows": total_rows,
+        "deviation_pearson": pooled.deviation_pearson,
+        "effect_spearman": pooled.effect_spearman,
+        "shift_direction_accuracy": pooled.shift_direction_accuracy,
+        "shift_mae_bp": pooled.shift_mae_bp,
+        "average_precision": pooled.average_precision,
+        "target_locus_rows": pooled.target_locus_rows,
         "context_units": len(metrics),
+        "counts": pooled.counts,
+        "coverage_complete": pooled.coverage_complete,
     }
 
 
@@ -449,6 +457,128 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _run_protocol_provenance(config: FineTuneConfig) -> dict[str, object]:
+    protocol: dict[str, object] = {"kind": config.run_protocol}
+    if config.selected_pilot_json is not None:
+        protocol.update(
+            {
+                "selected_pilot_json": str(config.selected_pilot_json.resolve()),
+                "selected_pilot_json_sha256": _sha256(config.selected_pilot_json),
+            }
+        )
+    return protocol
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, object]:
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} does not exist: {path}")
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid JSON: {path}") from error
+    if not isinstance(payload, dict):
+        raise TypeError(f"{label} must contain a JSON object")
+    return payload
+
+
+def _require_bound_path(
+    payload: Mapping[str, object],
+    *,
+    path_key: str,
+    hash_key: str,
+    expected: Path,
+    label: str,
+) -> None:
+    stored_path = payload.get(path_key)
+    stored_hash = payload.get(hash_key)
+    if (
+        not isinstance(stored_path, str)
+        or Path(stored_path).resolve() != expected.resolve()
+    ):
+        raise ValueError(f"{label} path does not match")
+    if not isinstance(stored_hash, str) or stored_hash != _sha256(expected):
+        raise ValueError(f"{label} SHA-256 does not match")
+
+
+def load_passing_validation_report(
+    validation_report_path: Path,
+    *,
+    base_checkpoint_path: Path,
+    tuned_checkpoint_path: Path,
+) -> dict[str, object]:
+    """Validate the final validation gate before challenge data can be opened."""
+    report = _read_json_object(validation_report_path, "validation report")
+    if report.get("schema_version") != REPORT_SCHEMA_VERSION:
+        raise ValueError("validation report schema version is not supported")
+    if report.get("analysis") != "differential_nucleosome_validation":
+        raise ValueError("validation report analysis is not recognized")
+    if report.get("split") != "validation":
+        raise ValueError("validation report split must be validation")
+    if report.get("status") != "passing" or report.get("passes_gates") is not True:
+        raise ValueError("validation report must identify a passing gate")
+    _require_bound_path(
+        report,
+        path_key="base_checkpoint",
+        hash_key="base_checkpoint_sha256",
+        expected=base_checkpoint_path,
+        label="base checkpoint",
+    )
+    _require_bound_path(
+        report,
+        path_key="selected_checkpoint",
+        hash_key="selected_checkpoint_sha256",
+        expected=tuned_checkpoint_path,
+        label="selected checkpoint",
+    )
+    selected_step = report.get("selected_step")
+    if (
+        isinstance(selected_step, bool)
+        or not isinstance(selected_step, int)
+        or selected_step < 1
+    ):
+        raise ValueError("validation report selected step must be a positive integer")
+    lambda_dev = report.get("lambda_dev")
+    if (
+        isinstance(lambda_dev, bool)
+        or not isinstance(lambda_dev, (int, float))
+        or not math.isfinite(float(lambda_dev))
+        or float(lambda_dev) not in APPROVED_PILOT_LAMBDAS
+    ):
+        raise ValueError("validation report lambda is not an approved value")
+
+    protocol = report.get("run_protocol")
+    if not isinstance(protocol, dict):
+        raise TypeError("validation report protocol must be an object")
+    if protocol.get("kind") != "selected_pilot_restart":
+        raise ValueError("validation report protocol must be selected_pilot_restart")
+    selected_pilot_path = protocol.get("selected_pilot_json")
+    selected_pilot_hash = protocol.get("selected_pilot_json_sha256")
+    if not isinstance(selected_pilot_path, str) or not isinstance(
+        selected_pilot_hash, str
+    ):
+        raise TypeError("validation report protocol is missing selected-pilot binding")
+    selected_path = Path(selected_pilot_path).resolve()
+    if selected_pilot_hash != _sha256(selected_path):
+        raise ValueError("validation report selected-pilot SHA-256 does not match")
+    selection = _read_json_object(selected_path, "selected pilot report")
+    if (
+        selection.get("schema_version") != REPORT_SCHEMA_VERSION
+        or selection.get("analysis") != "differential_nucleosome_pilot_selection"
+        or selection.get("passes_gates") is not True
+    ):
+        raise ValueError("validation report protocol references an invalid selection")
+    if float(selection.get("lambda_dev", float("nan"))) != float(lambda_dev):
+        raise ValueError("validation report lambda does not match selected pilot")
+    _require_bound_path(
+        selection,
+        path_key="base_checkpoint",
+        hash_key="base_checkpoint_sha256",
+        expected=base_checkpoint_path,
+        label="selected pilot base checkpoint",
+    )
+    return report
 
 
 @dataclass
@@ -572,9 +702,8 @@ def _score_differential(
     dataset: PairedContextDataset,
     device: torch.device,
     amp: bool,
-) -> dict[str, float | int]:
+) -> dict[str, object]:
     metrics = []
-    rankings = []
     model.eval()
     with torch.no_grad():
         for example in dataset:
@@ -593,15 +722,7 @@ def _score_differential(
                     example.deviation_slice,
                 )
             )
-            rankings.append(
-                score_context_ranking_inputs(
-                    predicted,
-                    observed,
-                    calls,
-                    example.deviation_slice,
-                )
-            )
-    return aggregate_differential_metrics(metrics, rankings)
+    return aggregate_differential_metrics(metrics)
 
 
 def _centered_pearson(
@@ -739,9 +860,16 @@ def _non_adult_rows_unchanged(
             base_model.nuc_profile_w.detach().cpu()[non_adult],
             tuned_model.nuc_profile_w.detach().cpu()[non_adult],
         )
-        and torch.equal(
-            base_model.nuc_profile_b.detach().cpu()[non_adult],
-            tuned_model.nuc_profile_b.detach().cpu()[non_adult],
+    )
+
+
+def _profile_bias_unchanged(
+    base_model: HybridMultiCellModel, tuned_model: HybridMultiCellModel
+) -> bool:
+    return bool(
+        torch.equal(
+            base_model.nuc_profile_b.detach().cpu(),
+            tuned_model.nuc_profile_b.detach().cpu(),
         )
     )
 
@@ -750,6 +878,7 @@ def evaluate_checkpoints(
     *,
     base_checkpoint_path: Path,
     tuned_checkpoint_path: Path,
+    validation_report_path: Path,
     manifest_path: Path,
     manifest_root: Path | None,
     metadata_path: Path,
@@ -766,6 +895,11 @@ def evaluate_checkpoints(
     """Evaluate base and tuned checkpoints once on test-only context units."""
     if out_json.exists():
         raise FileExistsError(f"refusing to overwrite existing evaluation: {out_json}")
+    validation_report = load_passing_validation_report(
+        validation_report_path,
+        base_checkpoint_path=base_checkpoint_path,
+        tuned_checkpoint_path=tuned_checkpoint_path,
+    )
     fold = json.loads(fold_json.read_text())
     validate_fold_boundaries(fold)
     device = torch.device(device_name)
@@ -780,6 +914,14 @@ def evaluate_checkpoints(
         raise ValueError(
             "tuned checkpoint was not derived from the supplied base checkpoint"
         )
+    if tuned_checkpoint.get("selected_step") != validation_report["selected_step"]:
+        raise ValueError("tuned checkpoint selected step does not match validation")
+    if float(tuned_checkpoint.get("lambda_dev", float("nan"))) != float(
+        validation_report["lambda_dev"]
+    ):
+        raise ValueError("tuned checkpoint lambda does not match validation")
+    if tuned_checkpoint.get("run_protocol") != validation_report["run_protocol"]:
+        raise ValueError("tuned checkpoint protocol does not match validation")
 
     manifest = read_manifest(manifest_path, manifest_root)
     metadata = read_metadata(metadata_path)
@@ -790,6 +932,7 @@ def evaluate_checkpoints(
     checkpoint_index = map_adult_checkpoint_indices(adult_manifest, cell_types)
     calls = pl.read_parquet(calls_path)
     test_chromosomes = set(APPROVED_TEST_CHROMOSOMES)
+    observed_chromosomes = sorted(set(calls["chrom"].to_list()))
     validate_artifact_chromosomes(
         calls,
         allowed=test_chromosomes,
@@ -849,17 +992,32 @@ def evaluate_checkpoints(
             tuned_model,
             list(checkpoint_index.values()),
         )
+        profile_bias_unchanged = _profile_bias_unchanged(base_model, tuned_model)
+        passes_evaluation_gate = (
+            _differential_coverage_matches(base_differential, tuned_differential)
+            and accessibility_unchanged
+            and non_adult_unchanged
+            and profile_bias_unchanged
+        )
         report = {
+            "schema_version": REPORT_SCHEMA_VERSION,
             "analysis": "differential_nucleosome_test_challenge",
+            "split": "test",
+            "evaluation_kind": "corrective_re_evaluation",
             "ascertainment": (
                 "These loci are an ascertained differential challenge set, "
                 "not an unbiased genome-wide sample."
             ),
-            "chromosomes": sorted(test_chromosomes),
+            "chromosomes": observed_chromosomes,
             "base_checkpoint": str(base_checkpoint_path.resolve()),
             "base_checkpoint_sha256": expected_hash,
             "tuned_checkpoint": str(tuned_checkpoint_path.resolve()),
             "tuned_checkpoint_sha256": _sha256(tuned_checkpoint_path),
+            "validation_report": str(validation_report_path.resolve()),
+            "validation_report_sha256": _sha256(validation_report_path),
+            "validation_selected_step": validation_report["selected_step"],
+            "validation_lambda_dev": validation_report["lambda_dev"],
+            "validation_run_protocol": validation_report["run_protocol"],
             "calls": str(calls_path.resolve()),
             "calls_sha256": _sha256(calls_path),
             "base": {
@@ -872,6 +1030,8 @@ def evaluate_checkpoints(
             },
             "accessibility_unchanged": accessibility_unchanged,
             "non_adult_unchanged": non_adult_unchanged,
+            "profile_bias_unchanged": profile_bias_unchanged,
+            "passes_evaluation_gate": passes_evaluation_gate,
         }
         _write_json(out_json, report)
         return report
@@ -897,21 +1057,24 @@ def _validation_snapshot(
     non_adult_unchanged = _non_adult_rows_unchanged(
         base_model, tuned_model, adult_indices
     )
+    profile_bias_unchanged = _profile_bias_unchanged(base_model, tuned_model)
     base_gate = {
         **base_ordinary,
-        "shift_direction_accuracy": base_differential["shift_direction_accuracy"],
+        **base_differential,
     }
     tuned_gate = {
         **tuned_ordinary,
-        "shift_direction_accuracy": tuned_differential["shift_direction_accuracy"],
+        **tuned_differential,
         "accessibility_unchanged": accessibility_unchanged,
         "non_adult_unchanged": non_adult_unchanged,
+        "profile_bias_unchanged": profile_bias_unchanged,
     }
     validation = {
         **tuned_differential,
         **tuned_ordinary,
         "accessibility_unchanged": accessibility_unchanged,
         "non_adult_unchanged": non_adult_unchanged,
+        "profile_bias_unchanged": profile_bias_unchanged,
     }
     comparison = {
         "base": {"differential": base_differential, "ordinary": base_ordinary},
@@ -930,18 +1093,36 @@ def _save_finetuned_checkpoint(
     config: FineTuneConfig,
     step: int,
 ) -> None:
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "args": prepared.checkpoint["args"],
-            "cell_types": prepared.checkpoint["cell_types"],
-            "base_checkpoint": str(config.checkpoint.resolve()),
-            "base_checkpoint_sha256": _sha256(config.checkpoint),
-            "lambda_dev": config.lambda_dev,
-            "selected_step": step,
-        },
-        path,
-    )
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "args": prepared.checkpoint["args"],
+        "cell_types": prepared.checkpoint["cell_types"],
+        "base_checkpoint": str(config.checkpoint.resolve()),
+        "base_checkpoint_sha256": _sha256(config.checkpoint),
+        "lambda_dev": config.lambda_dev,
+        "selected_step": step,
+        "run_protocol": _run_protocol_provenance(config),
+        "trainable_parameters": {"nuc_profile_w": "adult_rows_only"},
+        "frozen_parameters": {"nuc_profile_b": "all_rows"},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w+b",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _close_replay_loader(loader: DataLoader) -> None:
@@ -1041,6 +1222,9 @@ def _run_single_finetune_owned(
         "alpha": config.alpha,
         "steps": config.steps,
         "seed": config.seed,
+        "run_protocol": _run_protocol_provenance(config),
+        "trainable_parameters": {"nuc_profile_w": "adult_rows_only"},
+        "frozen_parameters": {"nuc_profile_b": "all_rows"},
     }
     logger = start_wandb_run(
         enabled=config.wandb,
@@ -1140,11 +1324,20 @@ def _run_single_finetune_owned(
                     checkpoint_path, prepared.model, prepared, config, step
                 )
         report = {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "analysis": "differential_nucleosome_validation",
+            "split": "validation",
             "status": "passing"
             if selected_step is not None
             else "no_passing_checkpoint",
             **provenance,
             "selected_step": selected_step,
+            "selected_checkpoint": (
+                str(checkpoint_path.resolve()) if selected_step is not None else None
+            ),
+            "selected_checkpoint_sha256": (
+                _sha256(checkpoint_path) if selected_step is not None else None
+            ),
             "passes_gates": selected_step is not None,
             "validation": selected_validation or last_validation,
             "comparison": selected_comparison or last_comparison,
@@ -1205,6 +1398,8 @@ def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
             lambda_dev=lambda_dev,
             steps=config.pilot_steps,
             output_name=f"pilot_lambda_{lambda_dev:g}",
+            run_protocol="pilot_sweep_candidate",
+            selected_pilot_json=None,
         )
         runs.append(run_single_finetune(candidate))
     passing = [run for run in runs if run.passes_gates]
@@ -1217,6 +1412,8 @@ def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
         default=None,
     )
     payload = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "analysis": "differential_nucleosome_pilot_selection",
         "passes_gates": selected is not None,
         "lambda_dev": selected.lambda_dev if selected is not None else None,
         "selected_step": selected.selected_step if selected is not None else None,
@@ -1231,7 +1428,13 @@ def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
                 "passes_gates": run.passes_gates,
                 "selected_step": run.selected_step,
                 "checkpoint": run.checkpoint_path,
+                "checkpoint_sha256": (
+                    _sha256(run.checkpoint_path)
+                    if run.checkpoint_path is not None
+                    else None
+                ),
                 "report": run.report_path,
+                "report_sha256": _sha256(run.report_path),
                 "validation": run.validation,
             }
             for run in runs
@@ -1413,6 +1616,13 @@ def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> boo
     tuned_nll = _metric(tuned, "nuc_profile_nll")
     base_shift = _metric(base, "shift_direction_accuracy")
     tuned_shift = _metric(tuned, "shift_direction_accuracy")
+    differential_names = (
+        "deviation_pearson",
+        "effect_spearman",
+        "shift_direction_accuracy",
+        "shift_mae_bp",
+        "average_precision",
+    )
     if not all(
         math.isfinite(value)
         for value in (
@@ -1422,8 +1632,12 @@ def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> boo
             tuned_nll,
             base_shift,
             tuned_shift,
+            *(_metric(base, name) for name in differential_names),
+            *(_metric(tuned, name) for name in differential_names),
         )
     ):
+        return False
+    if not _differential_coverage_matches(base, tuned):
         return False
     if tuned_pearson < base_pearson - 0.01:
         return False
@@ -1434,6 +1648,33 @@ def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> boo
     return (
         tuned.get("accessibility_unchanged") is True
         and tuned.get("non_adult_unchanged") is True
+        and tuned.get("profile_bias_unchanged") is True
+    )
+
+
+def _differential_coverage_matches(
+    base: Mapping[str, object], tuned: Mapping[str, object]
+) -> bool:
+    endpoint_names = (
+        "deviation_pearson",
+        "effect_spearman",
+        "shift_direction_accuracy",
+        "shift_mae_bp",
+        "average_precision",
+    )
+    base_counts = base.get("counts")
+    tuned_counts = tuned.get("counts")
+    return bool(
+        base.get("coverage_complete") is True
+        and tuned.get("coverage_complete") is True
+        and isinstance(base_counts, dict)
+        and isinstance(tuned_counts, dict)
+        and base_counts == tuned_counts
+        and all(
+            math.isfinite(_metric(metrics, name))
+            for metrics in (base, tuned)
+            for name in endpoint_names
+        )
     )
 
 
@@ -1447,6 +1688,11 @@ def load_selected_lambda(
     if expected_checkpoint is None and expected_checkpoint_sha256 is None:
         raise ValueError("expected checkpoint path or SHA-256 is required")
     selection = json.loads(selected_pilot_json.read_text())
+    if (
+        selection.get("schema_version") != REPORT_SCHEMA_VERSION
+        or selection.get("analysis") != "differential_nucleosome_pilot_selection"
+    ):
+        raise ValueError("selected pilot JSON schema is not supported")
     if selection.get("passes_gates") is not True:
         raise ValueError("selected pilot JSON does not identify a passing candidate")
     value = selection.get("lambda_dev")
@@ -1476,7 +1722,7 @@ def load_hybrid_checkpoint(
     path: str | Path, device: torch.device
 ) -> tuple[HybridMultiCellModel, dict]:
     """Load a hybrid checkpoint without changing its cell-type row ordering."""
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
     args = checkpoint.get("args")
     if not isinstance(args, dict) or not args.get("hybrid"):
         raise ValueError(
@@ -1553,6 +1799,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = subparsers.add_parser("evaluate", help="compare base and tuned models")
     evaluate.add_argument("--base-checkpoint", required=True, type=Path)
     evaluate.add_argument("--tuned-checkpoint", required=True, type=Path)
+    evaluate.add_argument("--validation-report", required=True, type=Path)
     _add_shared_data_arguments(evaluate)
     evaluate.add_argument("--calls", required=True, type=Path)
     evaluate.add_argument("--split", choices=("test",), default="test")
@@ -1567,9 +1814,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run the requested fine-tuning or evaluation command."""
     args = build_parser().parse_args(argv)
     if args.command == "evaluate":
-        evaluate_checkpoints(
+        report = evaluate_checkpoints(
             base_checkpoint_path=args.base_checkpoint,
             tuned_checkpoint_path=args.tuned_checkpoint,
+            validation_report_path=args.validation_report,
             manifest_path=args.manifest,
             manifest_root=args.manifest_root,
             metadata_path=args.metadata,
@@ -1584,7 +1832,7 @@ def main(argv: list[str] | None = None) -> int:
             num_workers=args.num_workers,
         )
         print(f"wrote evaluation: {args.out_json}")
-        return 0
+        return 0 if report.get("passes_evaluation_gate") is True else 2
 
     config = FineTuneConfig(
         checkpoint=args.checkpoint,
@@ -1627,6 +1875,8 @@ def main(argv: list[str] | None = None) -> int:
             lambda_dev=selected_lambda,
             steps=args.full_steps,
             output_name="final",
+            run_protocol="selected_pilot_restart",
+            selected_pilot_json=args.selected_pilot_json,
         )
     )
     print(f"wrote validation report: {result.report_path}")

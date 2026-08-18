@@ -249,7 +249,7 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 validation_examples[1].sequence.unsqueeze(0), torch.tensor([1])
             )[0].clone()
             base_nonadult_rows = base_model.nuc_profile_w[[0, 5]].clone()
-            base_nonadult_biases = base_model.nuc_profile_b[[0, 5]].clone()
+            base_profile_biases = base_model.nuc_profile_b.clone()
 
         guard = configure_adult_profile_finetune(tuned_model, ADULT_INDICES.tolist())
         alpha = 1.0
@@ -289,7 +289,7 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 validation_examples[1].sequence.unsqueeze(0), torch.tensor([1])
             )[0]
             tuned_nonadult_rows = tuned_model.nuc_profile_w[[0, 5]]
-            tuned_nonadult_biases = tuned_model.nuc_profile_b[[0, 5]]
+            tuned_profile_biases = tuned_model.nuc_profile_b
 
         print(
             "DIFFERENTIAL_FINETUNE_METRICS "
@@ -313,7 +313,7 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
             base_nonadult_rows, tuned_nonadult_rows, rtol=0, atol=0
         )
         torch.testing.assert_close(
-            base_nonadult_biases, tuned_nonadult_biases, rtol=0, atol=0
+            base_profile_biases, tuned_profile_biases, rtol=0, atol=0
         )
 
 

@@ -22,8 +22,8 @@ from chrombpnet.multitask.differential_finetune import (
 )
 from chrombpnet.multitask.differential_finetune_data import PairedContextExample
 from chrombpnet.multitask.differential_finetune_metrics import (
+    DifferentialEndpointInputs,
     DifferentialMetrics,
-    DifferentialRankingInputs,
 )
 from chrombpnet.multitask.fine_tune_differential_torch import (
     APPROVED_TEST_CHROMOSOMES,
@@ -35,6 +35,7 @@ from chrombpnet.multitask.fine_tune_differential_torch import (
     _close_replay_loader,
     _DatasetCollection,
     _prepare_run,
+    _save_finetuned_checkpoint,
     aggregate_differential_metrics,
     assert_production_cardinalities,
     build_adult_replay_loader,
@@ -112,12 +113,93 @@ class HybridCheckpointTests(unittest.TestCase):
             path,
         )
 
-        model, checkpoint = load_hybrid_checkpoint(path, torch.device("cpu"))
+        with patch.object(torch, "load", wraps=torch.load) as safe_load:
+            model, checkpoint = load_hybrid_checkpoint(path, torch.device("cpu"))
 
         self.assertEqual(checkpoint["cell_types"], cell_types)
+        self.assertIs(safe_load.call_args.kwargs["weights_only"], True)
         self.assertIsInstance(model, HybridMultiCellModel)
         for name, value in source.state_dict().items():
             torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+
+
+class AtomicCheckpointTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def _inputs(self, root: Path):
+        base = root / "base.pt"
+        base.write_bytes(b"base")
+        model = tiny_hybrid()
+        prepared = SimpleNamespace(
+            checkpoint={
+                "args": checkpoint_args(hybrid=True),
+                "cell_types": [f"cell_{index}" for index in range(6)],
+            }
+        )
+        config = FineTuneConfig(
+            checkpoint=base,
+            manifest=root / "manifest.tsv",
+            metadata=root / "metadata.tsv",
+            fold_json=root / "fold.json",
+            train_calls=root / "train.parquet",
+            valid_calls=root / "valid.parquet",
+            genome=root / "genome.fa",
+            out_dir=root,
+            lambda_dev=4.0,
+        )
+        return model, prepared, config
+
+    def test_checkpoint_save_flushes_and_atomically_replaces_destination(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            destination = root / "candidate.pt"
+            destination.write_bytes(b"previous passing checkpoint")
+            model, prepared, config = self._inputs(root)
+
+            with (
+                patch("os.fsync", wraps=__import__("os").fsync) as fsync,
+                patch("os.replace", wraps=__import__("os").replace) as replace_file,
+            ):
+                _save_finetuned_checkpoint(
+                    destination, model, prepared, config, step=250
+                )
+
+            checkpoint = torch.load(destination, map_location="cpu", weights_only=True)
+            self.assertEqual(checkpoint["selected_step"], 250)
+            self.assertGreaterEqual(fsync.call_count, 1)
+            replace_file.assert_called_once()
+            self.assertEqual(replace_file.call_args.args[1], destination)
+            self.assertEqual(list(root.glob(".candidate.pt.*.tmp")), [])
+
+    def test_failed_checkpoint_save_retains_previous_destination_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            destination = root / "candidate.pt"
+            previous = b"previous passing checkpoint"
+            destination.write_bytes(previous)
+            model, prepared, config = self._inputs(root)
+
+            def fail_after_partial_write(_payload, handle):
+                handle.write(b"partial")
+                raise OSError("injected save failure")
+
+            with (
+                patch("torch.save", side_effect=fail_after_partial_write),
+                patch("os.replace") as replace_file,
+                self.assertRaisesRegex(OSError, "injected save failure"),
+            ):
+                _save_finetuned_checkpoint(
+                    destination, model, prepared, config, step=250
+                )
+
+            self.assertEqual(destination.read_bytes(), previous)
+            replace_file.assert_not_called()
+            self.assertEqual(list(root.glob(".candidate.pt.*.tmp")), [])
 
     def test_rejects_conditioned_shared_head_checkpoint(self):
         cell_types = ["a", "b", "c", "d"]
@@ -173,6 +255,7 @@ class CliContractTests(unittest.TestCase):
         for option in (
             "--base-checkpoint",
             "--tuned-checkpoint",
+            "--validation-report",
             "--manifest",
             "--metadata",
             "--fold-json",
@@ -181,6 +264,29 @@ class CliContractTests(unittest.TestCase):
             "--out-json",
         ):
             self.assertIn(option, help_text)
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "evaluate",
+                    "--base-checkpoint",
+                    "base.pt",
+                    "--tuned-checkpoint",
+                    "tuned.pt",
+                    "--manifest",
+                    "manifest.tsv",
+                    "--metadata",
+                    "metadata.tsv",
+                    "--fold-json",
+                    "fold.json",
+                    "--calls",
+                    "calls.parquet",
+                    "--genome",
+                    "genome.fa",
+                    "--out-json",
+                    "evaluation.json",
+                ]
+            )
 
     def test_train_modes_are_mutually_exclusive_and_defaults_are_approved(self):
         parser = build_parser()
@@ -224,6 +330,35 @@ class CliContractTests(unittest.TestCase):
                     "selected.json",
                 ]
             )
+
+    def test_evaluate_command_fails_closed_when_evaluation_gate_fails(self):
+        arguments = [
+            "evaluate",
+            "--base-checkpoint",
+            "base.pt",
+            "--tuned-checkpoint",
+            "tuned.pt",
+            "--validation-report",
+            "final_validation.json",
+            "--manifest",
+            "manifest.tsv",
+            "--metadata",
+            "metadata.tsv",
+            "--fold-json",
+            "fold.json",
+            "--calls",
+            "calls.parquet",
+            "--genome",
+            "genome.fa",
+            "--out-json",
+            "evaluation.json",
+        ]
+        with patch.object(
+            fine_tune,
+            "evaluate_checkpoints",
+            return_value={"passes_evaluation_gate": False},
+        ):
+            self.assertEqual(fine_tune.main(arguments), 2)
 
 
 class ReplayLoaderTests(unittest.TestCase):
@@ -312,6 +447,7 @@ class OptimizerStepTests(unittest.TestCase):
             torch.tensor([1, 4]),
         )
         before_w = model.nuc_profile_w.detach().clone()
+        before_b = model.nuc_profile_b.detach().clone()
         with torch.no_grad():
             before_accessibility = model(sequence.unsqueeze(0), torch.tensor([1]))[:2]
 
@@ -339,6 +475,7 @@ class OptimizerStepTests(unittest.TestCase):
         torch.testing.assert_close(
             before_w[[0, 5]], model.nuc_profile_w[[0, 5]], rtol=0, atol=0
         )
+        torch.testing.assert_close(before_b, model.nuc_profile_b, rtol=0, atol=0)
         with torch.no_grad():
             after_accessibility = model(sequence.unsqueeze(0), torch.tensor([1]))[:2]
         for before, after in zip(
@@ -475,10 +612,31 @@ class BasePearsonPreflightTests(unittest.TestCase):
 
 class PreservationGateTests(unittest.TestCase):
     def setUp(self):
+        counts = {
+            name: {"expected": 4, "eligible": 4, "scored": 4}
+            for name in (
+                "deviation_pearson",
+                "effect_spearman",
+                "shift_direction_accuracy",
+                "shift_mae_bp",
+            )
+        }
+        counts["average_precision"] = {
+            "expected": 4,
+            "eligible": 4,
+            "scored": 4,
+            "positives": 1,
+        }
         self.base = {
             "nuc_profile_pearson": 0.50,
             "nuc_profile_nll": 100.0,
             "shift_direction_accuracy": 0.75,
+            "effect_spearman": 0.5,
+            "shift_mae_bp": 4.0,
+            "average_precision": 0.6,
+            "deviation_pearson": 0.4,
+            "counts": counts,
+            "coverage_complete": True,
         }
 
     def test_accepts_metrics_at_preservation_boundaries(self):
@@ -486,8 +644,15 @@ class PreservationGateTests(unittest.TestCase):
             "nuc_profile_pearson": 0.49,
             "nuc_profile_nll": 102.0,
             "shift_direction_accuracy": 0.75,
+            "effect_spearman": 0.5,
+            "shift_mae_bp": 4.0,
+            "average_precision": 0.6,
+            "deviation_pearson": 0.4,
+            "counts": self.base["counts"],
+            "coverage_complete": True,
             "accessibility_unchanged": True,
             "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
         }
         self.assertTrue(passes_gates(self.base, tuned))
 
@@ -497,6 +662,7 @@ class PreservationGateTests(unittest.TestCase):
             nuc_profile_pearson=0.489,
             accessibility_unchanged=True,
             non_adult_unchanged=True,
+            profile_bias_unchanged=True,
         )
         self.assertFalse(passes_gates(self.base, tuned))
 
@@ -506,6 +672,7 @@ class PreservationGateTests(unittest.TestCase):
             nuc_profile_nll=102.01,
             accessibility_unchanged=True,
             non_adult_unchanged=True,
+            profile_bias_unchanged=True,
         )
         self.assertFalse(passes_gates(self.base, tuned))
 
@@ -518,6 +685,7 @@ class PreservationGateTests(unittest.TestCase):
                     shift_direction_accuracy=0.74,
                     accessibility_unchanged=True,
                     non_adult_unchanged=True,
+                    profile_bias_unchanged=True,
                 ),
             )
         )
@@ -528,6 +696,7 @@ class PreservationGateTests(unittest.TestCase):
                     self.base,
                     accessibility_unchanged=False,
                     non_adult_unchanged=True,
+                    profile_bias_unchanged=True,
                 ),
             )
         )
@@ -537,6 +706,7 @@ class PreservationGateTests(unittest.TestCase):
             **self.base,
             "accessibility_unchanged": True,
             "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
         }
         metric_cases = [
             ("base", "nuc_profile_pearson"),
@@ -557,7 +727,11 @@ class PreservationGateTests(unittest.TestCase):
                     else:
                         target[key] = undefined
                     self.assertFalse(passes_gates(candidate_base, candidate_tuned))
-        for key in ("accessibility_unchanged", "non_adult_unchanged"):
+        for key in (
+            "accessibility_unchanged",
+            "non_adult_unchanged",
+            "profile_bias_unchanged",
+        ):
             for undefined in ("missing", None, float("nan"), 1):
                 with self.subTest(key=key, value=undefined):
                     candidate = dict(tuned)
@@ -567,6 +741,33 @@ class PreservationGateTests(unittest.TestCase):
                         candidate[key] = undefined
                     self.assertFalse(passes_gates(self.base, candidate))
 
+    def test_rejects_missing_incomplete_or_mismatched_endpoint_coverage(self):
+        tuned = {
+            **self.base,
+            "accessibility_unchanged": True,
+            "non_adult_unchanged": True,
+            "profile_bias_unchanged": True,
+        }
+        for side, mutation in (
+            ("base", {"coverage_complete": False}),
+            ("tuned", {"coverage_complete": False}),
+            ("base", {"counts": None}),
+            ("tuned", {"counts": None}),
+        ):
+            with self.subTest(side=side, mutation=mutation):
+                candidate_base = dict(self.base)
+                candidate_tuned = dict(tuned)
+                (candidate_base if side == "base" else candidate_tuned).update(mutation)
+                self.assertFalse(passes_gates(candidate_base, candidate_tuned))
+
+        mismatched = dict(tuned)
+        mismatched_counts = {
+            name: dict(values) for name, values in self.base["counts"].items()
+        }
+        mismatched_counts["shift_direction_accuracy"]["scored"] = 3
+        mismatched["counts"] = mismatched_counts
+        self.assertFalse(passes_gates(self.base, mismatched))
+
     def test_load_selected_lambda_requires_a_passing_selection(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             checkpoint = Path(temporary_directory) / "base.pt"
@@ -574,6 +775,8 @@ class PreservationGateTests(unittest.TestCase):
             digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
             path = Path(temporary_directory) / "selected.json"
             selection = {
+                "schema_version": 2,
+                "analysis": "differential_nucleosome_pilot_selection",
                 "lambda_dev": 4.0,
                 "passes_gates": True,
                 "base_checkpoint": str(checkpoint.resolve()),
@@ -597,6 +800,8 @@ class PreservationGateTests(unittest.TestCase):
             other.write_bytes(b"other")
             path = root / "selected.json"
             selection = {
+                "schema_version": 2,
+                "analysis": "differential_nucleosome_pilot_selection",
                 "lambda_dev": 2.0,
                 "passes_gates": True,
                 "base_checkpoint": str(checkpoint.resolve()),
@@ -671,6 +876,10 @@ class OrchestrationContractTests(unittest.TestCase):
             fold_path.write_text(json.dumps(fold))
             with (
                 patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.load_passing_validation_report",
+                    return_value={},
+                ),
+                patch(
                     "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint"
                 ) as load_checkpoint,
                 self.assertRaisesRegex(ValueError, "fold role 'train'"),
@@ -678,6 +887,7 @@ class OrchestrationContractTests(unittest.TestCase):
                 evaluate_checkpoints(
                     base_checkpoint_path=root / "base.pt",
                     tuned_checkpoint_path=root / "tuned.pt",
+                    validation_report_path=root / "validation.json",
                     manifest_path=root / "manifest.tsv",
                     manifest_root=None,
                     metadata_path=root / "metadata.tsv",
@@ -835,23 +1045,90 @@ class OrchestrationContractTests(unittest.TestCase):
                 _prepare_run(config, torch.device("cpu"))
             mapper.assert_not_called()
 
-    def test_aggregate_metrics_pools_auprc_across_all_target_rows(self):
+    def test_aggregate_metrics_pool_all_endpoint_rows_once(self):
         metrics = [
-            DifferentialMetrics(0.2, 0.1, 0.5, 12.0, 1.0, 2),
-            DifferentialMetrics(0.8, 0.7, 1.0, 2.0, 0.25, 4),
-        ]
-        ranking = [
-            DifferentialRankingInputs((0.2, 0.1), (True, False)),
-            DifferentialRankingInputs(
-                (0.9, 0.8, 0.7, 0.6),
-                (False, False, False, True),
+            DifferentialMetrics.from_endpoint_inputs(
+                DifferentialEndpointInputs(
+                    deviation_pearsons=(0.1, 0.3),
+                    deviation_eligible=(True, True),
+                    predicted_effects=(1.0, 2.0),
+                    observed_effects=(1.0, 2.0),
+                    predicted_shifts=(12.0, -99.0),
+                    observed_shifts=(12.0, 5.0),
+                    predicted_robust_z=(0.2, 0.1),
+                    observed_calls=(True, False),
+                )
+            ),
+            DifferentialMetrics.from_endpoint_inputs(
+                DifferentialEndpointInputs(
+                    deviation_pearsons=(0.5, 0.7, 0.9, 1.0),
+                    deviation_eligible=(True, True, True, True),
+                    predicted_effects=(6.0, 5.0, 4.0, 3.0),
+                    observed_effects=(3.0, 4.0, 5.0, 6.0),
+                    predicted_shifts=(12.0, 0.0, 3.0, 4.0),
+                    observed_shifts=(-12.0, 0.0, float("nan"), 8.0),
+                    predicted_robust_z=(0.9, 0.8, 0.7, 0.6),
+                    observed_calls=(False, False, False, True),
+                )
             ),
         ]
 
-        summary = aggregate_differential_metrics(metrics, ranking)
+        summary = aggregate_differential_metrics(metrics)
 
-        self.assertAlmostEqual(summary["deviation_pearson"], 0.6)
+        self.assertAlmostEqual(summary["deviation_pearson"], 0.5833333333333334)
+        self.assertAlmostEqual(summary["effect_spearman"], 0.4285714285714286)
+        self.assertAlmostEqual(summary["shift_direction_accuracy"], 0.5)
+        self.assertAlmostEqual(summary["shift_mae_bp"], 12.0)
         self.assertAlmostEqual(summary["average_precision"], 0.325)
+        self.assertEqual(
+            summary["counts"]["effect_spearman"],
+            {"expected": 6, "eligible": 6, "scored": 6},
+        )
+        self.assertEqual(
+            summary["counts"]["shift_direction_accuracy"],
+            {"expected": 6, "eligible": 2, "scored": 2},
+        )
+        self.assertEqual(
+            summary["counts"]["shift_mae_bp"],
+            {"expected": 6, "eligible": 2, "scored": 2},
+        )
+        self.assertTrue(summary["coverage_complete"])
+
+    def test_aggregate_metrics_records_partial_prediction_coverage(self):
+        metrics = [
+            DifferentialMetrics.from_endpoint_inputs(
+                DifferentialEndpointInputs(
+                    deviation_pearsons=(0.2, float("nan"), 0.4, 0.6),
+                    deviation_eligible=(True, True, True, True),
+                    predicted_effects=(1.0, float("nan"), 3.0, 4.0),
+                    observed_effects=(1.0, 2.0, 3.0, 4.0),
+                    predicted_shifts=(12.0, float("nan"), 99.0, 0.0),
+                    observed_shifts=(12.0, -15.0, 5.0, float("nan")),
+                    predicted_robust_z=(1.0, float("nan"), 0.5, 0.0),
+                    observed_calls=(True, False, False, False),
+                )
+            )
+        ]
+
+        summary = aggregate_differential_metrics(metrics)
+
+        self.assertFalse(summary["coverage_complete"])
+        self.assertEqual(
+            summary["counts"]["deviation_pearson"],
+            {"expected": 4, "eligible": 4, "scored": 3},
+        )
+        self.assertEqual(
+            summary["counts"]["effect_spearman"],
+            {"expected": 4, "eligible": 4, "scored": 3},
+        )
+        self.assertEqual(
+            summary["counts"]["shift_direction_accuracy"],
+            {"expected": 4, "eligible": 2, "scored": 1},
+        )
+        self.assertEqual(
+            summary["counts"]["average_precision"],
+            {"expected": 4, "eligible": 4, "scored": 3, "positives": 1},
+        )
 
     def test_wandb_failure_warns_and_returns_local_logger(self):
         with (
@@ -890,15 +1167,17 @@ class OrchestrationContractTests(unittest.TestCase):
                 observed_configs.append(candidate)
                 passing = candidate.lambda_dev != 0.25
                 score = {0.25: 0.9, 1.0: 0.4, 4.0: 0.7}[candidate.lambda_dev]
+                candidate.out_dir.mkdir(parents=True, exist_ok=True)
+                report_path = candidate.out_dir / f"{candidate.output_name}.json"
+                report_path.write_text("{}\n")
+                checkpoint_path = candidate.out_dir / f"{candidate.output_name}.pt"
+                if passing:
+                    checkpoint_path.write_bytes(b"checkpoint")
                 return RunResult(
                     lambda_dev=candidate.lambda_dev,
                     selected_step=250,
-                    checkpoint_path=(
-                        candidate.out_dir / f"{candidate.output_name}.pt"
-                        if passing
-                        else None
-                    ),
-                    report_path=candidate.out_dir / f"{candidate.output_name}.json",
+                    checkpoint_path=(checkpoint_path if passing else None),
+                    report_path=report_path,
                     validation={
                         "deviation_pearson": score,
                         "shift_direction_accuracy": 1.0,
@@ -977,6 +1256,142 @@ class OrchestrationContractTests(unittest.TestCase):
                 run_pilot_sweep(config, [4.0, 0.25, 1.0])
 
 
+class ValidationReportBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.base = self.root / "base.pt"
+        self.tuned = self.root / "tuned.pt"
+        self.selection = self.root / "selected_pilot.json"
+        self.report = self.root / "final_validation.json"
+        self.base.write_bytes(b"base checkpoint")
+        self.tuned.write_bytes(b"tuned checkpoint")
+        self.selection.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "analysis": "differential_nucleosome_pilot_selection",
+                    "passes_gates": True,
+                    "lambda_dev": 4.0,
+                    "base_checkpoint": str(self.base.resolve()),
+                    "base_checkpoint_sha256": hashlib.sha256(
+                        self.base.read_bytes()
+                    ).hexdigest(),
+                }
+            )
+            + "\n"
+        )
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "analysis": "differential_nucleosome_validation",
+            "split": "validation",
+            "status": "passing",
+            "passes_gates": True,
+            "base_checkpoint": str(self.base.resolve()),
+            "base_checkpoint_sha256": hashlib.sha256(
+                self.base.read_bytes()
+            ).hexdigest(),
+            "selected_checkpoint": str(self.tuned.resolve()),
+            "selected_checkpoint_sha256": hashlib.sha256(
+                self.tuned.read_bytes()
+            ).hexdigest(),
+            "selected_step": 9_500,
+            "lambda_dev": 4.0,
+            "run_protocol": {
+                "kind": "selected_pilot_restart",
+                "selected_pilot_json": str(self.selection.resolve()),
+                "selected_pilot_json_sha256": hashlib.sha256(
+                    self.selection.read_bytes()
+                ).hexdigest(),
+            },
+        }
+
+    def _evaluate(self):
+        return evaluate_checkpoints(
+            base_checkpoint_path=self.base,
+            tuned_checkpoint_path=self.tuned,
+            validation_report_path=self.report,
+            manifest_path=self.root / "manifest.tsv",
+            manifest_root=None,
+            metadata_path=self.root / "metadata.tsv",
+            fold_json=self.root / "fold.json",
+            calls_path=self.root / "calls.parquet",
+            genome=self.root / "genome.fa",
+            out_json=self.root / "evaluation.json",
+            device_name="cpu",
+            amp=False,
+        )
+
+    def test_missing_malformed_or_failing_report_aborts_before_any_data_load(self):
+        cases = (
+            ("missing", None, "validation report"),
+            ("malformed", "{not json", "validation report"),
+            (
+                "failing",
+                json.dumps({**self._payload(), "passes_gates": False}),
+                "passing",
+            ),
+        )
+        for label, contents, message in cases:
+            with self.subTest(label=label):
+                self.report.unlink(missing_ok=True)
+                if contents is not None:
+                    self.report.write_text(contents)
+                with (
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint"
+                    ) as load_checkpoint,
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch.read_manifest"
+                    ) as load_manifest,
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch.pl.read_parquet"
+                    ) as load_calls,
+                    self.assertRaisesRegex((FileNotFoundError, ValueError), message),
+                ):
+                    self._evaluate()
+                load_checkpoint.assert_not_called()
+                load_manifest.assert_not_called()
+                load_calls.assert_not_called()
+
+    def test_mismatched_or_incomplete_binding_aborts_before_any_data_load(self):
+        mutations = (
+            ("schema", {"schema_version": 1}, "schema"),
+            ("split", {"split": "test"}, "split"),
+            ("base_path", {"base_checkpoint": "/wrong/base.pt"}, "base checkpoint"),
+            ("base_hash", {"base_checkpoint_sha256": "wrong"}, "base checkpoint"),
+            ("tuned_path", {"selected_checkpoint": "/wrong/tuned.pt"}, "checkpoint"),
+            ("tuned_hash", {"selected_checkpoint_sha256": "wrong"}, "checkpoint"),
+            ("step", {"selected_step": None}, "selected step"),
+            ("lambda", {"lambda_dev": 2.0}, "lambda"),
+            ("protocol", {"run_protocol": None}, "protocol"),
+        )
+        for label, mutation, message in mutations:
+            with self.subTest(label=label):
+                self.report.write_text(json.dumps({**self._payload(), **mutation}))
+                with (
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint"
+                    ) as load_checkpoint,
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch.read_manifest"
+                    ) as load_manifest,
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch.pl.read_parquet"
+                    ) as load_calls,
+                    self.assertRaisesRegex((TypeError, ValueError), message),
+                ):
+                    self._evaluate()
+                load_checkpoint.assert_not_called()
+                load_manifest.assert_not_called()
+                load_calls.assert_not_called()
+
+
 class CleanupAndWandbTests(unittest.TestCase):
     def _call_evaluation(
         self,
@@ -1002,6 +1417,9 @@ class CleanupAndWandbTests(unittest.TestCase):
         tuned_checkpoint = {
             **checkpoint,
             "base_checkpoint_sha256": "base-hash",
+            "selected_step": 250,
+            "lambda_dev": 1.0,
+            "run_protocol": {"kind": "selected_pilot_restart"},
         }
         adult_manifest = pl.DataFrame(
             {"cell_type": ["adult_a"], "nuc_bw": ["adult_a.bw"]}
@@ -1012,6 +1430,16 @@ class CleanupAndWandbTests(unittest.TestCase):
             else {"return_value": replay_loader}
         )
         with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.load_passing_validation_report",
+                    return_value={
+                        "selected_step": 250,
+                        "lambda_dev": 1.0,
+                        "run_protocol": {"kind": "selected_pilot_restart"},
+                    },
+                )
+            )
             stack.enter_context(
                 patch(
                     "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint",
@@ -1107,6 +1535,7 @@ class CleanupAndWandbTests(unittest.TestCase):
             return evaluate_checkpoints(
                 base_checkpoint_path=root / "base.pt",
                 tuned_checkpoint_path=root / "tuned.pt",
+                validation_report_path=root / "validation.json",
                 manifest_path=root / "manifest.tsv",
                 manifest_root=None,
                 metadata_path=root / "metadata.tsv",
@@ -1574,6 +2003,18 @@ class RealOrchestrationTests(unittest.TestCase):
             },
             self.root / "base.pt",
         )
+        selection = {
+            "schema_version": 2,
+            "analysis": "differential_nucleosome_pilot_selection",
+            "passes_gates": True,
+            "lambda_dev": 1.0,
+            "selected_step": 2,
+            "base_checkpoint": str((self.root / "base.pt").resolve()),
+            "base_checkpoint_sha256": hashlib.sha256(
+                (self.root / "base.pt").read_bytes()
+            ).hexdigest(),
+        }
+        (self.root / "selected_pilot.json").write_text(json.dumps(selection) + "\n")
 
     def test_real_training_restart_validation_checkpoint_cleanup_and_evaluation(self):
         config = FineTuneConfig(
@@ -1595,6 +2036,8 @@ class RealOrchestrationTests(unittest.TestCase):
             replay_batch_size=488,
             validation_replay_examples=4,
             seed=17,
+            run_protocol="selected_pilot_restart",
+            selected_pilot_json=self.root / "selected_pilot.json",
         )
 
         events = []
@@ -1644,6 +2087,7 @@ class RealOrchestrationTests(unittest.TestCase):
         report = evaluate_checkpoints(
             base_checkpoint_path=self.root / "base.pt",
             tuned_checkpoint_path=result.checkpoint_path,
+            validation_report_path=result.report_path,
             manifest_path=self.root / "manifest.tsv",
             manifest_root=None,
             metadata_path=self.root / "metadata.tsv",
@@ -1658,11 +2102,14 @@ class RealOrchestrationTests(unittest.TestCase):
         )
 
         self.assertTrue(evaluation_path.is_file())
-        self.assertEqual(report["chromosomes"], ["chr1", "chr3", "chr6"])
+        self.assertEqual(report["evaluation_kind"], "corrective_re_evaluation")
+        self.assertEqual(report["chromosomes"], ["chr3"])
         self.assertEqual(report["base"]["differential"]["context_units"], 1)
         self.assertEqual(report["tuned"]["differential"]["target_locus_rows"], 4)
         self.assertTrue(report["accessibility_unchanged"])
         self.assertTrue(report["non_adult_unchanged"])
+        self.assertTrue(report["profile_bias_unchanged"])
+        self.assertTrue(report["passes_evaluation_gate"])
 
 
 if __name__ == "__main__":
