@@ -5,7 +5,10 @@ import unittest
 import numpy as np
 
 from chrombpnet.multitask.differential_finetune_metrics import (
+    DifferentialRankingInputs,
+    pooled_average_precision,
     score_context_predictions,
+    score_context_ranking_inputs,
 )
 
 
@@ -58,3 +61,37 @@ class DifferentialFineTuneMetricsTests(unittest.TestCase):
         )
 
         self.assertTrue(np.isnan(metrics.average_precision))
+
+    def test_ranking_inputs_preserve_per_target_scores_and_labels(self):
+        perfect_logits, observed, observed_calls, center_slice = known_shift_context()
+
+        ranking_inputs = score_context_ranking_inputs(
+            perfect_logits, observed, observed_calls, center_slice
+        )
+        self.assertEqual(ranking_inputs.observed_calls, (True, False, False, False))
+        self.assertEqual(len(ranking_inputs.predicted_robust_z), 4)
+        self.assertEqual(
+            pooled_average_precision((ranking_inputs,)),
+            score_context_predictions(
+                perfect_logits, observed, observed_calls, center_slice
+            ).average_precision,
+        )
+
+    def test_pooled_average_precision_scores_all_context_rows_once(self):
+        first = DifferentialRankingInputs((0.2, 0.1), (True, False))
+        second = DifferentialRankingInputs(
+            (0.9, 0.8, 0.7, 0.6), (False, False, False, True)
+        )
+        pooled = pooled_average_precision((first, second))
+
+        self.assertAlmostEqual(pooled, 0.325)
+        self.assertNotAlmostEqual(
+            pooled,
+            (pooled_average_precision((first,)) + pooled_average_precision((second,)))
+            / 2.0,
+        )
+
+    def test_pooled_average_precision_returns_nan_without_ranking_positives(self):
+        self.assertTrue(np.isnan(pooled_average_precision(())))
+        no_positive = DifferentialRankingInputs((0.2, -0.1), (False, False))
+        self.assertTrue(np.isnan(pooled_average_precision((no_positive,))))

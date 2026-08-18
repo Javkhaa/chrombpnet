@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,6 +25,18 @@ class DifferentialMetrics:
     shift_mae_bp: float
     average_precision: float
     target_locus_rows: int
+
+
+@dataclass(frozen=True)
+class DifferentialRankingInputs:
+    """Per-target ranking values and observed labels from one locus context."""
+
+    predicted_robust_z: tuple[float, ...]
+    observed_calls: tuple[bool, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.predicted_robust_z) != len(self.observed_calls):
+            raise ValueError("predicted_robust_z and observed_calls must align")
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -99,6 +112,93 @@ def _average_precision(scores: np.ndarray, labels: np.ndarray) -> float:
     return float(precision[labels].mean())
 
 
+def pooled_average_precision(groups: Sequence[DifferentialRankingInputs]) -> float:
+    """Calculate one stable average-precision value across all context rows."""
+    if not groups:
+        return float("nan")
+    scores = np.concatenate(
+        [np.asarray(group.predicted_robust_z, dtype=np.float64) for group in groups]
+    )
+    labels = np.concatenate(
+        [np.asarray(group.observed_calls, dtype=bool) for group in groups]
+    )
+    return _average_precision(scores, labels)
+
+
+def _normalized_context_profiles(
+    predicted_logits: np.ndarray,
+    observed_raw: np.ndarray,
+    center_slice: slice,
+    sigma: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    predicted_crop = _softmax(predicted_logits)[:, center_slice]
+    observed_crop = observed_raw[:, center_slice]
+    if predicted_crop.shape[1] == 0:
+        raise ValueError("center_slice must select at least one position")
+    _, predicted_profiles = normalize_profiles(predicted_crop, sigma)
+    _, observed_profiles = normalize_profiles(observed_crop, sigma)
+    return predicted_profiles, observed_profiles
+
+
+def _ranking_inputs_from_profiles(
+    predicted_profiles: np.ndarray, observed_calls: np.ndarray
+) -> DifferentialRankingInputs:
+    target_locus_rows = predicted_profiles.shape[0]
+    if target_locus_rows < 2:
+        predicted_robust_z = np.full(target_locus_rows, np.nan)
+    else:
+        _, consensus = _leave_one_out_deviation(predicted_profiles)
+        effects = np.asarray(
+            [
+                _total_variation(predicted_profiles[index], consensus[index])
+                for index in range(target_locus_rows)
+            ]
+        )
+        predicted_robust_z = _robust_z(effects)
+    return DifferentialRankingInputs(
+        tuple(float(value) for value in predicted_robust_z),
+        tuple(bool(value) for value in observed_calls),
+    )
+
+
+def score_context_ranking_inputs(
+    predicted_logits: np.ndarray,
+    observed_profiles: np.ndarray,
+    observed_calls: np.ndarray,
+    center_slice: slice,
+    *,
+    sigma: float = 20.0,
+) -> DifferentialRankingInputs:
+    """Return per-target predicted ranking scores and observed call labels."""
+    predicted_logits = np.asarray(predicted_logits, dtype=np.float64)
+    observed_profiles = np.asarray(observed_profiles, dtype=np.float64)
+    observed_calls = np.asarray(observed_calls, dtype=bool)
+    if predicted_logits.ndim != 2 or observed_profiles.ndim != 2:
+        raise ValueError(
+            "predicted_logits and observed_profiles must have shape [cell, position]"
+        )
+    if predicted_logits.shape != observed_profiles.shape:
+        raise ValueError(
+            "predicted_logits and observed_profiles must have matching shapes"
+        )
+    if observed_calls.shape != (predicted_logits.shape[0],):
+        raise ValueError("observed_calls must have one value per target cell")
+    if (
+        not np.isfinite(predicted_logits).all()
+        or not np.isfinite(observed_profiles).all()
+    ):
+        raise ValueError("predicted_logits and observed_profiles must be finite")
+    if predicted_logits.shape[0] < 2:
+        return DifferentialRankingInputs(
+            tuple(float("nan") for _ in observed_calls),
+            tuple(bool(value) for value in observed_calls),
+        )
+    predicted_profiles, _ = _normalized_context_profiles(
+        predicted_logits, observed_profiles, center_slice, sigma
+    )
+    return _ranking_inputs_from_profiles(predicted_profiles, observed_calls)
+
+
 def score_context_predictions(
     predicted_logits: np.ndarray,
     observed_raw: np.ndarray,
@@ -135,12 +235,9 @@ def score_context_predictions(
             undefined, undefined, undefined, undefined, undefined, target_locus_rows
         )
 
-    predicted_crop = _softmax(predicted_logits)[:, center_slice]
-    observed_crop = observed_raw[:, center_slice]
-    if predicted_crop.shape[1] == 0:
-        raise ValueError("center_slice must select at least one position")
-    _, predicted_profiles = normalize_profiles(predicted_crop, sigma)
-    _, observed_profiles = normalize_profiles(observed_crop, sigma)
+    predicted_profiles, observed_profiles = _normalized_context_profiles(
+        predicted_logits, observed_raw, center_slice, sigma
+    )
 
     predicted_deviation, predicted_consensus = _leave_one_out_deviation(
         predicted_profiles
@@ -209,8 +306,8 @@ def score_context_predictions(
         effect_spearman=effect_spearman,
         shift_direction_accuracy=shift_direction_accuracy,
         shift_mae_bp=shift_mae_bp,
-        average_precision=_average_precision(
-            _robust_z(predicted_effect), observed_calls
+        average_precision=pooled_average_precision(
+            (_ranking_inputs_from_profiles(predicted_profiles, observed_calls),)
         ),
         target_locus_rows=target_locus_rows,
     )
