@@ -173,7 +173,13 @@ uv run chrombpnet-call-diff-nucleosomes \
   --min-lineage-comparators 3 --chunk-size 32 --cache-loci 100
 ```
 
-Run the three-lambda pilot from the original hybrid checkpoint:
+Run the three-lambda pilot from the original hybrid checkpoint. The first sweep in
+`diffnuc_finetune/pilot` is archived as invalid because CUDA AMP kept the profile
+forward in reduced precision and exposed unstable Pearson behavior. It is retained
+for provenance and is not scientific selection evidence. The corrected
+implementation reran the unchanged three-lambda protocol into `pilot_ampfix`; all
+24 candidate-step gate checks passed, and lambda 4.0 at step 2,000 was selected.
+The command below reflects that corrected run:
 
 ```bash
 uv run chrombpnet-finetune-diff-nucleosomes train \
@@ -185,7 +191,7 @@ uv run chrombpnet-finetune-diff-nucleosomes train \
   --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
   --train-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train/differential_nucleosomes.parquet \
   --valid-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid/differential_nucleosomes.parquet \
-  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot_ampfix \
   --lambda-dev-grid 0.25 1.0 4.0 --pilot-steps 2000 --full-steps 0 \
   --learning-rate 1e-5 --warmup-steps 100 --grad-clip 1.0 \
   --validate-every 250 --seed 0 --device cuda --amp \
@@ -205,7 +211,7 @@ uv run chrombpnet-finetune-diff-nucleosomes train \
   --train-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train/differential_nucleosomes.parquet \
   --valid-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid/differential_nucleosomes.parquet \
   --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final \
-  --selected-pilot-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot/selected_pilot.json \
+  --selected-pilot-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot_ampfix/selected_pilot.json \
   --pilot-steps 0 --full-steps 10000 --learning-rate 1e-5 \
   --warmup-steps 100 --grad-clip 1.0 --validate-every 250 \
   --seed 0 --device cuda --amp --wandb --wandb-project jg_experiments \
@@ -231,3 +237,30 @@ uv run chrombpnet-finetune-diff-nucleosomes evaluate \
   --out-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/test_comparison.json \
   --device cuda --amp
 ```
+
+## Fine-tuning outcome
+
+The corrected selector supplied lambda 4.0 and provenance only. The 10,000-step
+full run restarted model weights from the original
+`model_346_hybrid_long.pt` checkpoint, not from pilot weights. All 40 validation
+snapshots passed the preservation gates, and step 9,500 maximized validation
+deviation Pearson among passing checkpoints.
+
+On validation, deviation Pearson improved from 0.246053 to 0.248849, effect
+Spearman from 0.091179 to 0.093419, shift-direction accuracy from 0.508776 to
+0.510972, shift MAE from 25.1846 to 25.1612 bp, and differential AUPRC from
+0.039484 to 0.040289. Ordinary nucleosome Pearson changed by -0.000006 and NLL
+by +0.00930, within their gates. Accessibility outputs were unchanged, all 102
+non-adult rows were bitwise preserved, and every model tensor except the 244
+adult rows of `nuc_profile_w` and `nuc_profile_b` was bitwise unchanged.
+
+The untouched test command was executed once after validation selection. On the
+553-locus challenge set, deviation Pearson improved from 0.204143 to 0.205642,
+effect Spearman from 0.075204 to 0.076543, and shift MAE from 28.8626 to 28.8487
+bp. Shift-direction accuracy decreased from 0.515222 to 0.514865 and AUPRC from
+0.033735 to 0.033697. These mixed changes are tiny. The 553 loci were ascertained
+by an earlier mixed-cell differential screen, and 387 currently have an adult
+differential call; they are not an unbiased genome-wide sample.
+
+See `docs/differential_nucleosome_finetuning_results.md` for exact metrics,
+artifact hashes, W&B provenance, preservation evidence, and limitations.
