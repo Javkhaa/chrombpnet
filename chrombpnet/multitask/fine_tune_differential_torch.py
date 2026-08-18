@@ -48,6 +48,33 @@ from chrombpnet.training.models.multitask_nucleosome_torch import (
     multinomial_nll,
 )
 
+APPROVED_TRAIN_CHROMOSOMES = frozenset(
+    {
+        "chr2",
+        "chr4",
+        "chr5",
+        "chr7",
+        "chr9",
+        "chr10",
+        "chr11",
+        "chr12",
+        "chr13",
+        "chr14",
+        "chr15",
+        "chr16",
+        "chr17",
+        "chr18",
+        "chr19",
+        "chr21",
+        "chr22",
+        "chrX",
+        "chrY",
+    }
+)
+APPROVED_VALID_CHROMOSOMES = frozenset({"chr8", "chr20"})
+APPROVED_TEST_CHROMOSOMES = frozenset({"chr1", "chr3", "chr6"})
+APPROVED_PILOT_LAMBDAS = (0.25, 1.0, 4.0)
+
 
 @dataclass(frozen=True)
 class StepResult:
@@ -140,6 +167,39 @@ class WandbRun:
         finally:
             self.run = None
 
+    def update_config(self, values: Mapping[str, object]) -> None:
+        if self.run is None:
+            return
+        try:
+            self.run.config.update(dict(values), allow_val_change=True)
+        except Exception as error:  # noqa: BLE001 - logging must never abort training
+            warnings.warn(
+                f"W&B config update failed; continuing local training: {error}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.run = None
+
+
+class _CleanupStack:
+    def __init__(self) -> None:
+        self._callbacks: list[tuple[str, object]] = []
+
+    def callback(self, label: str, callback) -> None:
+        self._callbacks.append((label, callback))
+
+    def close(self) -> None:
+        while self._callbacks:
+            label, callback = self._callbacks.pop()
+            try:
+                callback()
+            except Exception as error:  # noqa: BLE001 - cleanup must continue
+                warnings.warn(
+                    f"cleanup failed for {label}: {error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
 
 def start_wandb_run(
     *,
@@ -218,14 +278,86 @@ def assert_production_cardinalities(
         )
 
 
+def _adult_metadata_cell_types(metadata: pl.DataFrame) -> list[str]:
+    required = {"cell_type", "is_adult", "is_cell_line"}
+    missing = sorted(required.difference(metadata.columns))
+    if missing:
+        raise ValueError(f"metadata missing required columns: {', '.join(missing)}")
+    normalized = metadata
+    for column in ("is_adult", "is_cell_line"):
+        if normalized.schema[column] == pl.Boolean:
+            continue
+        values = pl.col(column).cast(pl.String).str.to_lowercase().str.strip_chars()
+        normalized = normalized.with_columns(
+            values.is_in(["1", "true", "t", "yes", "y"]).alias(column)
+        )
+    adults = normalized.filter(pl.col("is_adult") & ~pl.col("is_cell_line"))
+    if adults["cell_type"].n_unique() != adults.height:
+        raise ValueError("adult metadata contains duplicate cell_type rows")
+    return [str(value) for value in adults["cell_type"].to_list()]
+
+
+def validate_adult_manifest_coverage(
+    adult_manifest: pl.DataFrame, metadata: pl.DataFrame
+) -> None:
+    """Require one manifest row for every adult metadata cell type, and no others."""
+    if adult_manifest["cell_type"].n_unique() != adult_manifest.height:
+        raise ValueError("adult manifest contains duplicate cell_type rows")
+    manifest_names = set(adult_manifest["cell_type"].to_list())
+    metadata_names = set(_adult_metadata_cell_types(metadata))
+    missing = sorted(metadata_names - manifest_names)
+    extra = sorted(manifest_names - metadata_names)
+    if missing or extra:
+        raise ValueError(
+            "adult manifest does not exactly cover adult metadata: "
+            f"missing={missing} extra={extra}"
+        )
+
+
+def validate_fold_boundaries(fold: Mapping[str, object]) -> None:
+    """Require the approved train/validation/test chromosome partition exactly."""
+    expected = {
+        "train": APPROVED_TRAIN_CHROMOSOMES,
+        "valid": APPROVED_VALID_CHROMOSOMES,
+        "test": APPROVED_TEST_CHROMOSOMES,
+    }
+    observed: dict[str, set[str]] = {}
+    for role, required in expected.items():
+        value = fold.get(role)
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ValueError(f"fold role {role!r} must be a chromosome list")
+        if len(value) != len(set(value)):
+            raise ValueError(f"fold role {role!r} contains duplicate chromosomes")
+        observed[role] = set(value)
+        if observed[role] != set(required):
+            raise ValueError(
+                f"fold role {role!r} does not match approved boundary: "
+                f"expected={sorted(required)} observed={sorted(observed[role])}"
+            )
+    if set(fold) != set(expected):
+        raise ValueError(f"fold must contain exactly these roles: {sorted(expected)}")
+    for first, second in (
+        ("train", "valid"),
+        ("train", "test"),
+        ("valid", "test"),
+    ):
+        overlap = observed[first] & observed[second]
+        if overlap:
+            raise ValueError(
+                f"fold roles {first!r} and {second!r} overlap: {sorted(overlap)}"
+            )
+
+
 def validate_call_splits(
     train_calls: pl.DataFrame,
     valid_calls: pl.DataFrame,
     train_chromosomes: set[str],
 ) -> None:
     """Reject gradient-bearing test data and any train/validation artifact mixing."""
-    test_chromosomes = {"chr1", "chr3", "chr6"}
-    validation_chromosomes = {"chr8", "chr20"}
+    test_chromosomes = set(APPROVED_TEST_CHROMOSOMES)
+    validation_chromosomes = set(APPROVED_VALID_CHROMOSOMES)
     blocked_fold = train_chromosomes & (test_chromosomes | validation_chromosomes)
     if blocked_fold:
         raise ValueError(
@@ -332,17 +464,23 @@ class _PreparedRun:
     fold: dict[str, list[str]]
 
 
-def _prepare_run(config: FineTuneConfig, device: torch.device) -> _PreparedRun:
+def _prepare_run(
+    config: FineTuneConfig,
+    device: torch.device,
+    cleanup: _CleanupStack | None = None,
+) -> _PreparedRun:
     model, checkpoint = load_hybrid_checkpoint(config.checkpoint, device)
     checkpoint_cell_types = checkpoint["cell_types"]
     manifest = read_manifest(config.manifest, config.manifest_root)
     metadata = read_metadata(config.metadata)
     adult_manifest = validate_adult_cohort(manifest, metadata)
     assert_production_cardinalities(checkpoint_cell_types, metadata)
+    validate_adult_manifest_coverage(adult_manifest, metadata)
     checkpoint_index = map_adult_checkpoint_indices(
         adult_manifest, checkpoint_cell_types
     )
     fold = json.loads(config.fold_json.read_text())
+    validate_fold_boundaries(fold)
     train_chromosomes = set(fold["train"])
     train_calls = pl.read_parquet(config.train_calls)
     valid_calls = pl.read_parquet(config.valid_calls)
@@ -366,6 +504,8 @@ def _prepare_run(config: FineTuneConfig, device: torch.device) -> _PreparedRun:
         args["inputlen"],
         args["outputlen"],
     )
+    if cleanup is not None:
+        cleanup.callback("training paired dataset", train_dataset.close)
     valid_dataset = PairedContextDataset(
         valid_units,
         config.genome,
@@ -373,6 +513,8 @@ def _prepare_run(config: FineTuneConfig, device: torch.device) -> _PreparedRun:
         args["inputlen"],
         args["outputlen"],
     )
+    if cleanup is not None:
+        cleanup.callback("validation paired dataset", valid_dataset.close)
     train_replay = build_adult_replay_loader(
         adult_manifest,
         checkpoint_index,
@@ -385,6 +527,10 @@ def _prepare_run(config: FineTuneConfig, device: torch.device) -> _PreparedRun:
         shuffle=True,
         seed=config.seed,
     )
+    if cleanup is not None:
+        cleanup.callback(
+            "training replay loader", lambda: _close_replay_loader(train_replay)
+        )
     valid_replay = build_adult_replay_loader(
         adult_manifest,
         checkpoint_index,
@@ -398,6 +544,10 @@ def _prepare_run(config: FineTuneConfig, device: torch.device) -> _PreparedRun:
         seed=config.seed + 1,
         max_examples=config.validation_replay_examples,
     )
+    if cleanup is not None:
+        cleanup.callback(
+            "validation replay loader", lambda: _close_replay_loader(valid_replay)
+        )
     return _PreparedRun(
         model=model,
         checkpoint=checkpoint,
@@ -589,6 +739,8 @@ def evaluate_checkpoints(
     """Evaluate base and tuned checkpoints once on test-only context units."""
     if out_json.exists():
         raise FileExistsError(f"refusing to overwrite existing evaluation: {out_json}")
+    fold = json.loads(fold_json.read_text())
+    validate_fold_boundaries(fold)
     device = torch.device(device_name)
     base_model, base_checkpoint = load_hybrid_checkpoint(base_checkpoint_path, device)
     tuned_model, tuned_checkpoint = load_hybrid_checkpoint(
@@ -607,10 +759,10 @@ def evaluate_checkpoints(
     adult_manifest = validate_adult_cohort(manifest, metadata)
     cell_types = base_checkpoint["cell_types"]
     assert_production_cardinalities(cell_types, metadata)
+    validate_adult_manifest_coverage(adult_manifest, metadata)
     checkpoint_index = map_adult_checkpoint_indices(adult_manifest, cell_types)
-    fold = json.loads(fold_json.read_text())
     calls = pl.read_parquet(calls_path)
-    test_chromosomes = {"chr1", "chr3", "chr6"}
+    test_chromosomes = set(APPROVED_TEST_CHROMOSOMES)
     validate_artifact_chromosomes(
         calls,
         allowed=test_chromosomes,
@@ -771,8 +923,9 @@ def _close_replay_loader(loader: DataLoader) -> None:
                 setattr(source, attribute, None)
 
 
-def run_single_finetune(config: FineTuneConfig) -> RunResult:
-    """Run one lambda candidate from the original base checkpoint."""
+def _run_single_finetune_owned(
+    config: FineTuneConfig, cleanup: _CleanupStack
+) -> RunResult:
     if config.steps < 1:
         raise ValueError("fine-tuning steps must be positive")
     if config.validate_every < 1:
@@ -793,7 +946,7 @@ def run_single_finetune(config: FineTuneConfig) -> RunResult:
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     device = torch.device(config.device)
-    prepared = _prepare_run(config, device)
+    prepared = _prepare_run(config, device, cleanup)
     base_model, base_checkpoint = load_hybrid_checkpoint(config.checkpoint, device)
     if base_checkpoint["cell_types"] != prepared.checkpoint["cell_types"]:
         raise AssertionError(
@@ -801,6 +954,7 @@ def run_single_finetune(config: FineTuneConfig) -> RunResult:
         )
     adult_indices = list(prepared.checkpoint_index.values())
     guard = configure_adult_profile_finetune(prepared.model, adult_indices)
+    cleanup.callback("frozen-row guard", guard.teardown)
     optimizer = guard.make_optimizer(config.learning_rate)
     sampler = ContextBalancedSampler(
         prepared.train_dataset,
@@ -841,6 +995,7 @@ def run_single_finetune(config: FineTuneConfig) -> RunResult:
         name=config.wandb_run_name,
         config=provenance,
     )
+    cleanup.callback("W&B run", logger.finish)
     validation_history = []
     selected_validation: dict[str, object] = {}
     selected_comparison: dict[str, object] = {}
@@ -946,6 +1101,16 @@ def run_single_finetune(config: FineTuneConfig) -> RunResult:
             ),
         }
         _write_json(report_path, report)
+        selection = {
+            "selected_step": selected_step,
+            "lambda_dev": config.lambda_dev,
+            "passes_gates": selected_step is not None,
+            "selected_checkpoint": (
+                str(checkpoint_path.resolve()) if selected_step is not None else None
+            ),
+        }
+        logger.log({f"selection/{key}": value for key, value in selection.items()})
+        logger.update_config(selection)
         return RunResult(
             lambda_dev=config.lambda_dev,
             selected_step=selected_step,
@@ -955,19 +1120,25 @@ def run_single_finetune(config: FineTuneConfig) -> RunResult:
             passes_gates=selected_step is not None,
         )
     finally:
-        guard.teardown()
-        prepared.train_dataset.close()
-        prepared.valid_dataset.close()
-        _close_replay_loader(prepared.train_replay)
-        _close_replay_loader(prepared.valid_replay)
-        logger.finish()
+        pass
+
+
+def run_single_finetune(config: FineTuneConfig) -> RunResult:
+    """Run one lambda candidate from the original base checkpoint."""
+    cleanup = _CleanupStack()
+    try:
+        return _run_single_finetune_owned(config, cleanup)
+    finally:
+        cleanup.close()
 
 
 def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
     """Run every pilot from the same base checkpoint and select passing metrics."""
-    values = tuple(float(value) for value in lambda_grid)
-    if not values or len(set(values)) != len(values):
-        raise ValueError("lambda_grid must contain unique values")
+    values = tuple(sorted(float(value) for value in lambda_grid))
+    if values != APPROVED_PILOT_LAMBDAS:
+        raise ValueError(
+            f"lambda_grid must contain exactly {list(APPROVED_PILOT_LAMBDAS)}"
+        )
     config.out_dir.mkdir(parents=True, exist_ok=True)
     selection_path = config.out_dir / "selected_pilot.json"
     if selection_path.exists():
@@ -999,7 +1170,8 @@ def run_pilot_sweep(config: FineTuneConfig, lambda_grid) -> SweepResult:
         "checkpoint": (
             selected.checkpoint_path if selected is not None else config.checkpoint
         ),
-        "base_checkpoint": config.checkpoint,
+        "base_checkpoint": config.checkpoint.resolve(),
+        "base_checkpoint_sha256": _sha256(config.checkpoint),
         "candidates": [
             {
                 "lambda_dev": run.lambda_dev,
@@ -1174,7 +1346,7 @@ def train_one_step(
 
 def _metric(metrics: Mapping[str, object], name: str) -> float:
     value = metrics.get(name)
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return float("nan")
     return float(value)
 
@@ -1185,6 +1357,8 @@ def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> boo
     tuned_pearson = _metric(tuned, "nuc_profile_pearson")
     base_nll = _metric(base, "nuc_profile_nll")
     tuned_nll = _metric(tuned, "nuc_profile_nll")
+    base_shift = _metric(base, "shift_direction_accuracy")
+    tuned_shift = _metric(tuned, "shift_direction_accuracy")
     if not all(
         math.isfinite(value)
         for value in (
@@ -1192,6 +1366,8 @@ def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> boo
             tuned_pearson,
             base_nll,
             tuned_nll,
+            base_shift,
+            tuned_shift,
         )
     ):
         return False
@@ -1199,26 +1375,46 @@ def passes_gates(base: Mapping[str, object], tuned: Mapping[str, object]) -> boo
         return False
     if tuned_nll > base_nll * 1.02:
         return False
-    base_shift = _metric(base, "shift_direction_accuracy")
-    tuned_shift = _metric(tuned, "shift_direction_accuracy")
-    if math.isfinite(base_shift) and (
-        not math.isfinite(tuned_shift) or tuned_shift < base_shift
-    ):
+    if tuned_shift < base_shift:
         return False
-    return bool(
-        tuned.get("accessibility_unchanged", True)
-        and tuned.get("non_adult_unchanged", True)
+    return (
+        tuned.get("accessibility_unchanged") is True
+        and tuned.get("non_adult_unchanged") is True
     )
 
 
-def load_selected_lambda(selected_pilot_json: Path) -> float:
+def load_selected_lambda(
+    selected_pilot_json: Path,
+    *,
+    expected_checkpoint: Path | None = None,
+    expected_checkpoint_sha256: str | None = None,
+) -> float:
     """Read the exact lambda from a passing pilot-selection artifact."""
+    if expected_checkpoint is None and expected_checkpoint_sha256 is None:
+        raise ValueError("expected checkpoint path or SHA-256 is required")
     selection = json.loads(selected_pilot_json.read_text())
     if selection.get("passes_gates") is not True:
         raise ValueError("selected pilot JSON does not identify a passing candidate")
     value = selection.get("lambda_dev")
-    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-        raise ValueError("selected pilot JSON has no finite lambda_dev")
+    if (
+        not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) not in APPROVED_PILOT_LAMBDAS
+    ):
+        raise ValueError("selected pilot JSON has no approved lambda_dev")
+    stored_path = selection.get("base_checkpoint")
+    stored_hash = selection.get("base_checkpoint_sha256")
+    if stored_path is None or stored_hash is None:
+        raise ValueError("selected pilot JSON is missing base checkpoint provenance")
+    if not isinstance(stored_path, str) or not isinstance(stored_hash, str):
+        raise TypeError("selected pilot base checkpoint provenance must be strings")
+    if expected_checkpoint is not None:
+        resolved = expected_checkpoint.resolve()
+        if Path(stored_path).resolve() != resolved:
+            raise ValueError("selected pilot base checkpoint path does not match")
+        expected_checkpoint_sha256 = _sha256(resolved)
+    if stored_hash != expected_checkpoint_sha256:
+        raise ValueError("selected pilot base checkpoint SHA-256 does not match")
     return float(value)
 
 
@@ -1364,7 +1560,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote pilot selection: {sweep.selection_path}")
         return 0 if sweep.selected_lambda is not None else 2
 
-    selected_lambda = load_selected_lambda(args.selected_pilot_json)
+    selected_lambda = load_selected_lambda(
+        args.selected_pilot_json, expected_checkpoint=args.checkpoint
+    )
     result = run_single_finetune(
         replace(
             config,
