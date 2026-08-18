@@ -212,6 +212,54 @@ class ConditionedMultiCellModel(nn.Module):
         return acc_profile, acc_count, nuc_profile, nuc_count
 
 
+class HybridMultiCellModel(ConditionedMultiCellModel):
+    """FiLM-conditioned trunk + SHARED accessibility head + PER-CELL nucleosome head.
+
+    Matched-budget experiments showed the two designs win different things: the shared
+    FiLM head fits the cell-type-invariant backbone better (higher absolute profile r),
+    while per-cell heads are the only ones that can *spatially reposition* a dyad
+    (6.5x cell-type deviation, 3x shift-direction) -- FiLM's channel-wise affine cannot
+    express a shift. Accessibility does not need that (FiLM wins it outright), so only
+    the nucleosome head goes per-cell.
+    """
+
+    def __init__(self, n_cell_types: int, inputlen: int = 2114, outputlen: int = 1000,
+                 filters: int = 256, n_dil_layers: int = 8, embed_dim: int = 32,
+                 cond_mode: str = 'film', profile_kernel_size: int = 75):
+        super().__init__(n_cell_types, inputlen, outputlen, filters, n_dil_layers,
+                         embed_dim, cond_mode)
+        del self.nucleosome                      # replaced by stacked per-cell parameters
+        self.pks = profile_kernel_size
+        self.nuc_profile_w = nn.Parameter(torch.empty(n_cell_types, filters, profile_kernel_size))
+        self.nuc_profile_b = nn.Parameter(torch.zeros(n_cell_types))
+        self.nuc_count_w = nn.Parameter(torch.empty(n_cell_types, filters))
+        self.nuc_count_b = nn.Parameter(torch.zeros(n_cell_types))
+        import math
+        for w in (self.nuc_profile_w, self.nuc_count_w):
+            nn.init.kaiming_uniform_(w, a=math.sqrt(5))
+
+    def forward(self, seq: torch.Tensor, ct_idx: torch.Tensor):
+        if seq.shape[1] != 4:
+            seq = seq.transpose(1, 2)
+        e = self.cell_emb(ct_idx)
+        x = F.relu(self.first(seq))
+        x = self._film_mod(self.norms[0](x), e, 0)
+        for j, conv in enumerate(self.dilated):
+            conv_x = F.relu(conv(x))
+            x = conv_x + self._center_crop(x, conv_x.shape[-1])
+            x = self._film_mod(self.norms[j + 1](x), e, j + 1)
+
+        acc_profile, acc_count = self.accessibility(x)
+        # per-cell nucleosome head: grouped conv gathers each sample's own filter
+        B, Fdim, L = x.shape
+        logits = F.conv1d(x.reshape(1, B * Fdim, L), self.nuc_profile_w[ct_idx],
+                          bias=self.nuc_profile_b[ct_idx], groups=B).reshape(B, -1)
+        nuc_profile = self._center_crop(logits, self.outputlen)
+        nuc_count = ((x.mean(dim=-1) * self.nuc_count_w[ct_idx]).sum(-1, keepdim=True)
+                     + self.nuc_count_b[ct_idx].unsqueeze(-1))
+        return acc_profile, acc_count, nuc_profile, nuc_count
+
+
 def multinomial_nll(true_counts: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     """Mean multinomial negative log likelihood for profile-count targets."""
     true_counts = true_counts.float()

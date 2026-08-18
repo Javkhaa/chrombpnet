@@ -29,7 +29,7 @@ from chrombpnet.multitask.torch_data import MultiTaskRegionDataset, _fetch_seq, 
 from chrombpnet.multitask.train_multitask_torch import load_regions
 from chrombpnet.multitask.train_multicell_torch import parse_manifest
 from chrombpnet.training.models.multitask_nucleosome_torch import (
-    MultiCellMultiTaskModel, ConditionedMultiCellModel)
+    MultiCellMultiTaskModel, ConditionedMultiCellModel, HybridMultiCellModel)
 import os
 import pyBigWig
 import pyfaidx
@@ -79,7 +79,11 @@ def main():
     ck = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     a = ck['args']; cell_types = ck['cell_types']
     ct_index = {name: i for i, name in enumerate(cell_types)}
-    if a.get('conditioned'):
+    if a.get('hybrid'):
+        model = HybridMultiCellModel(len(cell_types), a['inputlen'], a['outputlen'],
+                                     a['filters'], a['n_dil_layers'], a.get('embed_dim', 32),
+                                     cond_mode=a.get('cond_mode', 'film'))
+    elif a.get('conditioned'):
         model = ConditionedMultiCellModel(len(cell_types), a['inputlen'], a['outputlen'],
                                           a['filters'], a['n_dil_layers'], a.get('embed_dim', 32),
                                           cond_mode=a.get('cond_mode', 'additive'))

@@ -77,7 +77,7 @@ def validate(model, loader, device, args, multicell, max_batches=0):
 
 def fit(model, train_loader, valid_loader, optimizer, device, args, *,
         multicell, save_best, log_path, eval_ctx=None, wandb_run=None,
-        on_epoch_start=None):
+        on_epoch_start=None, dev_probe=None):
     """Run training. `save_best(val_loss)` persists the best checkpoint; `eval_ctx` is
     (dataset, indices, is_peak) for held-out metric logging (or None). Returns
     (best_val_loss, best_marker) where best_marker is the step (step-based) or epoch."""
@@ -85,6 +85,10 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
     global_step = 0
     val_every = getattr(args, 'val_every_steps', 0) or 0
     val_max_batches = getattr(args, 'val_max_batches', 0) or 0
+    max_steps = getattr(args, 'max_steps', 0) or 0   # hard step cap (matched-budget runs)
+    dev_w = getattr(args, 'deviation_loss_weight', 0.0) or 0.0
+    dev_every = max(getattr(args, 'deviation_every', 10) or 10, 1)
+    dev_bw = getattr(args, 'deviation_batch_windows', 8) or 8
     log_loss_every = getattr(args, 'log_loss_every', 0) or 0
 
     win = {'loss': 0.0, 'n': 0, 'grad': 0.0}
@@ -130,11 +134,27 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
         va = validate(model, valid_loader, device, args, multicell, val_max_batches)
         n = max(win['n'], 1)
         train_loss, val_loss = win['loss'] / n, va['loss']
-        print(f"epoch={epoch} step={global_step} train_loss={train_loss:.6f} val_loss={val_loss:.6f}", flush=True)
+        # Cell-type deviation: the metric that anti-correlates with val_loss under longer
+        # training (Role-b collapse). Optionally SELECT on it instead of val_loss.
+        dev_r = float('nan')
+        if dev_probe is not None:
+            dev_r = dev_probe.score(model, device, amp=getattr(args, 'amp', False))
+        select_dev = bool(getattr(args, 'select_on_deviation', False)) and dev_probe is not None
+        print(f"epoch={epoch} step={global_step} train_loss={train_loss:.6f} "
+              f"val_loss={val_loss:.6f}" + (f" dev_r={dev_r:.4f}" if dev_probe is not None else ""),
+              flush=True)
         log.write(f"{epoch},{global_step},{train_loss:.8f},{val_loss:.8f}\n"); log.flush()
-        is_best = val_loss < best
+        # lower-is-better objective: val_loss, or -deviation when selecting on deviation.
+        # A NaN deviation must never block saving -> fall back to val_loss.
+        if select_dev and dev_r == dev_r:
+            obj = -dev_r
+        else:
+            if select_dev:
+                print("[warn] deviation is NaN; selecting on val_loss this round", flush=True)
+            obj = val_loss
+        is_best = obj < best
         if is_best:
-            best = val_loss; best_marker = (global_step if val_every else epoch); stale = 0
+            best = obj; best_marker = (global_step if val_every else epoch); stale = 0
             save_best(best)
         else:
             stale += 1
@@ -145,6 +165,8 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                   'lr': optimizer.param_groups[0]['lr'],
                   'train/grad_norm': win['grad'] / n,
                   'time/window_sec': dt, 'time/train_samples_per_sec': win['n'] / dt}
+            if dev_probe is not None:
+                ld['val/deviation_r'] = dev_r
             for k in COMPONENT_KEYS:
                 ld[f'train/{k}'] = win[k] / n; ld[f'val/{k}'] = va[k]
             figs = None
@@ -194,6 +216,14 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                 with _amp_ctx(args, device):
                     outputs = _forward(model, seq, ct)
                     loss, comps = _loss(outputs, targets, args)
+                # Optimize the cell-type deviation directly (it is otherwise eroded by
+                # longer training). Applied every --deviation-every steps to bound cost.
+                if (dev_probe is not None and dev_w > 0
+                        and global_step % dev_every == 0):
+                    dl = dev_probe.loss(model, device, batch_windows=dev_bw,
+                                        amp=getattr(args, 'amp', False))
+                    if dl is not None:
+                        loss = loss + dev_w * dl
                 loss.backward()
                 # Real gradient clipping when --grad-clip > 0 (1e9 = effectively off).
                 # clip_grad_norm_ returns the pre-clip total norm, which we still log.
@@ -220,6 +250,12 @@ def fit(model, train_loader, valid_loader, optimizer, device, args, *,
                     reset_win()
                     if stop:
                         break
+                if max_steps and global_step >= max_steps:
+                    print(f"  reached --max-steps {max_steps}", flush=True)
+                    if val_every and global_step % val_every != 0:
+                        do_validation(epoch)   # score the final state before stopping
+                    stop = True
+                    break
             if stop:
                 break
             if not val_every:

@@ -33,7 +33,7 @@ from chrombpnet.multitask import train_loop
 from chrombpnet.multitask.torch_data import MultiTaskRegionDataset
 from chrombpnet.multitask.train_multitask_torch import load_regions
 from chrombpnet.training.models.multitask_nucleosome_torch import (
-    MultiCellMultiTaskModel, ConditionedMultiCellModel, multitask_loss,
+    MultiCellMultiTaskModel, ConditionedMultiCellModel, HybridMultiCellModel, multitask_loss,
 )
 
 
@@ -164,6 +164,23 @@ def main():
     ap.add_argument('--compile', action='store_true', help='torch.compile the model')
     ap.add_argument('--conditioned', action='store_true',
                     help='cell-type-conditioned trunk (FiLM on embedding) + shared heads')
+    ap.add_argument('--select-on-deviation', action='store_true',
+                    help='select/early-stop on cell-type DEVIATION instead of val_loss '
+                         '(they anti-correlate: longer training erodes deviation)')
+    ap.add_argument('--deviation-loss-weight', type=float, default=0.0,
+                    help='weight of the cell-type deviation loss term (0=off)')
+    ap.add_argument('--deviation-every', type=int, default=10,
+                    help='apply the deviation loss every N optimizer steps')
+    ap.add_argument('--deviation-batch-windows', type=int, default=8)
+    ap.add_argument('--deviation-probe-windows', type=int, default=192,
+                    help='windows in the deviation probe (0=disable probe entirely)')
+    ap.add_argument('--deviation-probe-cells', type=int, default=12,
+                    help='cell types sampled into the probe')
+    ap.add_argument('--max-steps', type=int, default=0,
+                    help='hard cap on optimizer steps (0=off); use for matched-budget A/B runs')
+    ap.add_argument('--hybrid', action='store_true',
+                    help='FiLM-conditioned trunk + shared accessibility head + PER-CELL nucleosome '
+                         'head (per-cell heads are the only ones that can spatially shift a dyad)')
     ap.add_argument('--embed-dim', type=int, default=32, help='cell-type embedding dim (--conditioned)')
     ap.add_argument('--cond-mode', choices=['additive', 'film'], default='additive',
                     help='conditioning: additive bias (stable) or FiLM scale+bias (needs warmup+decay)')
@@ -172,6 +189,9 @@ def main():
     ap.add_argument('--nuc-smooth-sigma', type=float, default=0.0,
                     help='Gaussian-smooth the sparse nucleosome dyad target (bp); helps the profile head learn occupancy')
     ap.add_argument('--lr-decay-steps', type=int, default=0, help='cosine-decay LR to a 5%% floor over N steps (0=off)')
+    ap.add_argument('--init-from', default=None,
+                    help='warm-start: copy matching params from a checkpoint (corpus model_state_dict '
+                         'or cfDNA model). cfDNA single head.* is remapped onto the nucleosome.* head.')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -224,15 +244,40 @@ def main():
     train_loader = make_loader(train_cat, True)
     valid_loader = make_loader(valid_cat, False)
 
-    if args.conditioned:
+    if args.hybrid:
+        raw_model = HybridMultiCellModel(len(cell_types), args.inputlen, args.outputlen,
+                                         args.filters, args.n_dil_layers, args.embed_dim,
+                                         cond_mode=args.cond_mode).to(device)
+    elif args.conditioned:
         raw_model = ConditionedMultiCellModel(len(cell_types), args.inputlen, args.outputlen,
                                               args.filters, args.n_dil_layers, args.embed_dim,
                                               cond_mode=args.cond_mode).to(device)
     else:
         raw_model = MultiCellMultiTaskModel(len(cell_types), args.inputlen, args.outputlen,
                                             args.filters, args.n_dil_layers).to(device)
+    if args.init_from:
+        src = torch.load(args.init_from, map_location='cpu', weights_only=False)
+        sd = src.get('model_state_dict') or src.get('model') or src
+        tgt = raw_model.state_dict()
+        loaded, trunk = 0, 0
+        for k, t in tgt.items():
+            cand = k
+            if k not in sd and k.startswith('nucleosome.'):
+                cand = 'head.' + k[len('nucleosome.'):]   # cfDNA single head -> nucleosome head
+            if cand in sd and sd[cand].shape == t.shape:
+                tgt[k] = sd[cand]; loaded += 1
+                if k.startswith(('first.', 'dilated.')):
+                    trunk += 1
+        raw_model.load_state_dict(tgt)
+        print(f"[init-from] {args.init_from}: loaded {loaded}/{len(tgt)} params "
+              f"({trunk} trunk) — rest at fresh init", flush=True)
     optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.learning_rate)
-    if args.compile:
+    if args.compile and args.hybrid:
+        # Hybrid has no separate .trunk method, and its per-cell head uses a data-dependent
+        # groups=B grouped conv -> whole-model compile would recompile per batch shape. Eager.
+        print('[compile] skipped for --hybrid (data-dependent grouped conv)', flush=True)
+        model = raw_model
+    elif args.compile:
         if args.conditioned:
             # Conditioned forward has no data-dependent control flow (FiLM is vectorized),
             # so the whole model compiles cleanly.
@@ -259,12 +304,35 @@ def main():
         torch.save({'model_state_dict': raw_model.state_dict(), 'args': vars(args),
                     'cell_types': cell_types, 'val_loss': val_loss}, str(out) + '.pt')
 
+    # Cell-type deviation probe: same windows across many cell types, built on the VALID
+    # chromosomes so selecting on it stays honest. Needed for --select-on-deviation and
+    # for the deviation loss term.
+    dev_probe = None
+    if args.deviation_probe_windows and (args.select_on_deviation or args.deviation_loss_weight):
+        from chrombpnet.multitask.deviation import DeviationProbe
+        # Probe cells must be DEEP: a window is usable only where every probe cell has
+        # signal, so shallow cells empty the intersection.
+        k = min(args.deviation_probe_cells, len(manifest))
+        by_depth = sorted(manifest, key=lambda m: os.path.getsize(m['nuc_bw'])
+                          if os.path.exists(m['nuc_bw']) else 0, reverse=True)
+        probe_rows = by_depth[:k]
+        regions = []
+        for _, r in load_regions(probe_rows[0]['peaks'], valid_chroms).iterrows():
+            regions.append((r['chr'], int(r['start']) + int(r['summit'])))
+        dev_probe = DeviationProbe(regions, args.genome, [m['nuc_bw'] for m in probe_rows],
+                                   [cell_types.index(m['cell_type']) for m in probe_rows],
+                                   args.inputlen, args.outputlen,
+                                   n_windows=args.deviation_probe_windows, seed=args.seed)
+        print(f"deviation probe: {dev_probe.n} windows x {k} cell types "
+              f"(valid chroms; select_on_deviation={args.select_on_deviation}, "
+              f"loss_w={args.deviation_loss_weight})", flush=True)
+
     try:
         best, best_marker = train_loop.fit(
             model, train_loader, valid_loader, optimizer, device, args,
             multicell=True, save_best=save_best, log_path=str(out.with_suffix('.log')),
             eval_ctx=(valid_cat, ev_idx, ev_is_peak), wandb_run=wandb_run,
-            on_epoch_start=train_cat.on_epoch_end)
+            on_epoch_start=train_cat.on_epoch_end, dev_probe=dev_probe)
         print('saved', str(out) + '.pt')
         if wandb_run is not None:
             wandb_run.summary['best_val_loss'] = best
