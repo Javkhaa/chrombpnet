@@ -252,6 +252,8 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
             base_nonadult_biases = base_model.nuc_profile_b[[0, 5]].clone()
 
         guard = configure_adult_profile_finetune(tuned_model, ADULT_INDICES.tolist())
+        alpha = 1.0
+        lambda_dev = 4.0
         optimizer = guard.make_optimizer(lr=1e-2)
         sampler = ContextBalancedSampler(units, num_samples=80, seed=0)
         for index in sampler:
@@ -263,14 +265,15 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 example,
                 _replay(example),
                 device=torch.device("cpu"),
-                alpha=1.0,
-                lambda_dev=4.0,
+                alpha=alpha,
+                lambda_dev=lambda_dev,
                 grad_clip=100.0,
             )
             self.assertTrue(np.isfinite(result.replay_nll))
             self.assertTrue(np.isfinite(result.total_loss))
             differential_total = (
-                result.differential_profile_nll + 4.0 * result.deviation_loss
+                alpha * result.differential_profile_nll
+                + lambda_dev * result.deviation_loss
             )
             np.testing.assert_allclose(
                 result.total_loss,
