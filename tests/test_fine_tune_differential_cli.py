@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tempfile
 import unittest
 import warnings
@@ -15,6 +16,7 @@ import polars as pl
 import pyBigWig
 import torch
 
+import chrombpnet.multitask.fine_tune_differential_torch as fine_tune
 from chrombpnet.multitask.differential_finetune import (
     configure_adult_profile_finetune,
 )
@@ -53,6 +55,7 @@ from chrombpnet.multitask.fine_tune_differential_torch import (
 from chrombpnet.training.models.multitask_nucleosome_torch import (
     ConditionedMultiCellModel,
     HybridMultiCellModel,
+    multinomial_nll,
 )
 
 
@@ -343,6 +346,131 @@ class OptimizerStepTests(unittest.TestCase):
         ):
             torch.testing.assert_close(before, after, rtol=0, atol=0)
         guard.teardown()
+
+
+class AmpCompatibilityTests(unittest.TestCase):
+    class AmpSensitiveProfileModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.autocast_states = []
+            self.register_buffer(
+                "profile_pattern", torch.log(torch.arange(1, 5, dtype=torch.float32))
+            )
+
+        def forward(self, sequence, _indices):
+            self.autocast_states.append(torch.is_autocast_enabled(sequence.device.type))
+            logits = (10_000.0 + self.profile_pattern).expand(sequence.shape[0], -1)
+            if self.autocast_states[-1]:
+                logits = logits.to(torch.bfloat16)
+            counts = torch.zeros((sequence.shape[0], 1), device=sequence.device)
+            return logits, counts, logits, counts
+
+    def test_constant_profile_rows_return_none_without_warnings(self):
+        logits = torch.ones(2, 4)
+        observed = torch.ones(2, 4)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pearsons = fine_tune._row_pearsons(logits, observed)
+        self.assertEqual(pearsons, [])
+        self.assertEqual(caught, [])
+        self.assertIsNone(fine_tune._centered_pearson(logits[0], observed[0]))
+
+    def test_amp_profile_forwards_keep_production_scale_positional_signal(self):
+        model = self.AmpSensitiveProfileModel()
+        profiles = torch.tensor([[1.0, 2.0, 3.0, 4.0]]).expand(2, -1)
+        loader = [
+            (
+                torch.zeros(2, 3, 4),
+                profiles,
+                torch.zeros(2, 1),
+                profiles,
+                torch.zeros(2, 1),
+                torch.zeros(2, dtype=torch.long),
+            )
+        ]
+        base, tuned, _ = fine_tune._score_ordinary_pair(
+            model, model, loader, torch.device("cpu"), amp=True
+        )
+        self.assertEqual(model.autocast_states, [False, False])
+        self.assertGreater(base["nuc_profile_pearson"], 0.99)
+        self.assertTrue(math.isfinite(tuned["nuc_profile_pearson"]))
+
+    def test_forward_helper_disables_enclosing_autocast(self):
+        model = self.AmpSensitiveProfileModel()
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            output = fine_tune._forward_model_float32(
+                model, torch.zeros(1, 3, 4), torch.zeros(1, dtype=torch.long)
+            )
+        self.assertEqual(model.autocast_states, [False])
+        self.assertEqual(output[2].dtype, torch.float32)
+
+    def test_float32_profile_logits_keep_multinomial_loss_finite_and_sensitive(self):
+        model = self.AmpSensitiveProfileModel()
+        counts = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            logits = fine_tune._forward_model_float32(
+                model, torch.zeros(1, 3, 4), torch.zeros(1, dtype=torch.long)
+            )[2]
+        matched_loss = multinomial_nll(counts, logits)
+        flattened_loss = multinomial_nll(counts, torch.full_like(logits, 10_000.0))
+        self.assertTrue(torch.isfinite(matched_loss))
+        self.assertTrue(torch.isfinite(flattened_loss))
+        self.assertLess(matched_loss, flattened_loss)
+
+
+class BasePearsonPreflightTests(unittest.TestCase):
+    def test_undefined_base_pearson_aborts_before_optimizer_setup(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = FineTuneConfig(
+                checkpoint=root / "base.pt",
+                manifest=root / "manifest.tsv",
+                metadata=root / "metadata.tsv",
+                fold_json=root / "fold.json",
+                train_calls=root / "train.parquet",
+                valid_calls=root / "valid.parquet",
+                genome=root / "genome.fa",
+                out_dir=root / "out",
+                device="cpu",
+                steps=1,
+                validate_every=1,
+            )
+            checkpoint = {"cell_types": ["adult_0"]}
+            prepared = SimpleNamespace(
+                checkpoint=checkpoint,
+                checkpoint_index={"adult_0": 0},
+                model=Mock(),
+                valid_replay=Mock(),
+            )
+            with (
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch._prepare_run",
+                    return_value=prepared,
+                ),
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint",
+                    return_value=(Mock(), checkpoint),
+                ),
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch._score_ordinary_pair",
+                    return_value=(
+                        {"nuc_profile_pearson": float("nan")},
+                        {"nuc_profile_pearson": float("nan")},
+                        True,
+                    ),
+                ),
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.configure_adult_profile_finetune",
+                    side_effect=RuntimeError("optimizer reached"),
+                ) as configure,
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch._score_differential"
+                ) as score_differential,
+                self.assertRaisesRegex(ValueError, "base ordinary validation.*Pearson"),
+            ):
+                run_single_finetune(config)
+            configure.assert_not_called()
+            score_differential.assert_not_called()
 
 
 class PreservationGateTests(unittest.TestCase):
@@ -1167,6 +1295,7 @@ class CleanupAndWandbTests(unittest.TestCase):
                 model=model,
                 checkpoint=checkpoint,
                 checkpoint_index={"cell_1": 1},
+                valid_replay=Mock(),
             )
 
             def fake_prepare(_config, _device, cleanup):
@@ -1185,6 +1314,10 @@ class CleanupAndWandbTests(unittest.TestCase):
                 patch(
                     "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint",
                     return_value=(tiny_hybrid(), checkpoint),
+                ),
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch._score_ordinary_pair",
+                    return_value=({"nuc_profile_pearson": 0.5}, {}, True),
                 ),
                 patch(
                     "chrombpnet.multitask.fine_tune_differential_torch.configure_adult_profile_finetune",
@@ -1215,6 +1348,7 @@ class CleanupAndWandbTests(unittest.TestCase):
                     train_dataset=Mock(),
                     valid_dataset=Mock(),
                     train_replay=[object()],
+                    valid_replay=Mock(),
                 )
 
                 def fake_prepare(
@@ -1252,6 +1386,10 @@ class CleanupAndWandbTests(unittest.TestCase):
                     patch(
                         "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint",
                         return_value=(tiny_hybrid(), checkpoint),
+                    ),
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch._score_ordinary_pair",
+                        return_value=({"nuc_profile_pearson": 0.5}, {}, True),
                     ),
                     patch(
                         "chrombpnet.multitask.fine_tune_differential_torch.configure_adult_profile_finetune",

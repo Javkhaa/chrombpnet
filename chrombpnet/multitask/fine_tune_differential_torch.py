@@ -561,6 +561,12 @@ def _prepare_run(
     )
 
 
+def _forward_model_float32(model, sequence: torch.Tensor, indices: torch.Tensor):
+    """Run profile heads outside autocast to preserve positional logit signal."""
+    with torch.autocast(sequence.device.type, dtype=torch.bfloat16, enabled=False):
+        return model(sequence, indices)
+
+
 def _score_differential(
     model: HybridMultiCellModel,
     dataset: PairedContextDataset,
@@ -575,9 +581,8 @@ def _score_differential(
             indices = example.checkpoint_indices.to(device)
             sequence = example.sequence.to(device)
             repeated = sequence.unsqueeze(0).expand(indices.numel(), -1, -1)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                logits = model(repeated, indices)[2]
-            predicted = logits.float().cpu().numpy()
+            logits = _forward_model_float32(model, repeated, indices)[2]
+            predicted = logits.cpu().numpy()
             observed = example.raw_profiles.numpy()
             calls = example.observed_calls.numpy()
             metrics.append(
@@ -599,16 +604,39 @@ def _score_differential(
     return aggregate_differential_metrics(metrics, rankings)
 
 
+def _centered_pearson(
+    predicted_row: torch.Tensor, observed_row: torch.Tensor
+) -> float | None:
+    """Return a finite float64 Pearson correlation or None for undefined rows."""
+    predicted = predicted_row.detach().to(dtype=torch.float64)
+    observed = observed_row.detach().to(dtype=torch.float64)
+    if not torch.isfinite(predicted).all() or not torch.isfinite(observed).all():
+        return None
+    predicted = predicted - predicted.mean()
+    observed = observed - observed.mean()
+    denominator = torch.linalg.vector_norm(predicted) * torch.linalg.vector_norm(
+        observed
+    )
+    if not torch.isfinite(denominator) or denominator <= torch.finfo(torch.float64).eps:
+        return None
+    correlation = torch.dot(predicted, observed) / denominator
+    if not torch.isfinite(correlation):
+        return None
+    return float(correlation)
+
+
 def _row_pearsons(logits: torch.Tensor, observed: torch.Tensor) -> list[float]:
-    predicted = torch.softmax(logits.float(), dim=-1).cpu().numpy()
-    raw = observed.float().cpu().numpy()
-    totals = raw.sum(axis=1, keepdims=True)
-    normalized = np.divide(raw, totals, out=np.zeros_like(raw), where=totals > 0)
+    predicted = torch.softmax(logits, dim=-1).detach().to(dtype=torch.float64)
+    raw = observed.detach().to(dtype=torch.float64)
+    totals = raw.sum(dim=1, keepdim=True)
+    normalized = torch.zeros_like(raw)
+    positive_totals = totals.squeeze(1) > 0
+    normalized[positive_totals] = raw[positive_totals] / totals[positive_totals]
     values = []
     for predicted_row, observed_row in zip(predicted, normalized, strict=True):
-        if np.std(predicted_row) == 0 or np.std(observed_row) == 0:
-            continue
-        values.append(float(np.corrcoef(predicted_row, observed_row)[0, 1]))
+        correlation = _centered_pearson(predicted_row, observed_row)
+        if correlation is not None:
+            values.append(correlation)
     return values
 
 
@@ -640,9 +668,8 @@ def _score_ordinary_pair(
             nuc = nuc.to(device)
             nuc_count = nuc_count.to(device)
             indices = indices.to(device)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                base_output = base_model(sequence, indices)
-                tuned_output = tuned_model(sequence, indices)
+            base_output = _forward_model_float32(base_model, sequence, indices)
+            tuned_output = _forward_model_float32(tuned_model, sequence, indices)
             batch_size = sequence.shape[0]
             examples += batch_size
             for values, output in (
@@ -969,6 +996,15 @@ def _run_single_finetune_owned(
         raise AssertionError(
             "base checkpoint cell ordering changed while preparing run"
         )
+    base_ordinary, _, _ = _score_ordinary_pair(
+        base_model, base_model, prepared.valid_replay, device, config.amp
+    )
+    if not math.isfinite(_metric(base_ordinary, "nuc_profile_pearson")):
+        raise ValueError(
+            "base ordinary validation requires a finite nucleosome profile Pearson "
+            "before optimization"
+        )
+
     adult_indices = list(prepared.checkpoint_index.values())
     guard = configure_adult_profile_finetune(prepared.model, adult_indices)
     cleanup.callback("frozen-row guard", guard.teardown)
@@ -1325,23 +1361,24 @@ def train_one_step(
     """Apply one paired-context update and one ordinary adult replay update."""
     model.train()
     optimizer.zero_grad(set_to_none=True)
-    with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-        indices = paired.checkpoint_indices.to(device)
-        sequence = paired.sequence.to(device)
-        repeated_sequence = sequence.unsqueeze(0).expand(indices.numel(), -1, -1)
-        paired_logits = model(repeated_sequence, indices)[2]
-        differential = differential_loss(
-            paired_logits,
-            paired.raw_profiles.to(device),
-            paired.deviation_slice,
-            alpha=alpha,
-            lambda_dev=lambda_dev,
-        )
+    indices = paired.checkpoint_indices.to(device)
+    sequence = paired.sequence.to(device)
+    repeated_sequence = sequence.unsqueeze(0).expand(indices.numel(), -1, -1)
+    paired_logits = _forward_model_float32(model, repeated_sequence, indices)[2]
+    differential = differential_loss(
+        paired_logits,
+        paired.raw_profiles.to(device),
+        paired.deviation_slice,
+        alpha=alpha,
+        lambda_dev=lambda_dev,
+    )
 
-        replay_sequence, _, _, replay_nuc, _, replay_indices = replay
-        replay_logits = model(replay_sequence.to(device), replay_indices.to(device))[2]
-        replay_nll = multinomial_nll(replay_nuc.to(device), replay_logits)
-        total = replay_nll + differential.total
+    replay_sequence, _, _, replay_nuc, _, replay_indices = replay
+    replay_logits = _forward_model_float32(
+        model, replay_sequence.to(device), replay_indices.to(device)
+    )[2]
+    replay_nll = multinomial_nll(replay_nuc.to(device), replay_logits)
+    total = replay_nll + differential.total
     if not torch.isfinite(total):
         raise FloatingPointError("non-finite fine-tuning loss")
     total.backward()
@@ -1476,7 +1513,11 @@ def _add_shared_data_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--amp", action="store_true")
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Accepted, but profile-head forwards stay float32 until head-safe AMP exists.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
