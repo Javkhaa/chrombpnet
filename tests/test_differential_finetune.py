@@ -16,7 +16,9 @@ from chrombpnet.training.models.multitask_nucleosome_torch import HybridMultiCel
 def shifted_four_cell_profiles(shift: int) -> torch.Tensor:
     positions = torch.arange(201, dtype=torch.float32)
     centers = torch.tensor([100 + shift, 100, 100 - shift, 100], dtype=torch.float32)
-    profiles = torch.exp(-0.5 * ((positions.unsqueeze(0) - centers.unsqueeze(1)) / 4.0) ** 2)
+    profiles = torch.exp(
+        -0.5 * ((positions.unsqueeze(0) - centers.unsqueeze(1)) / 4.0) ** 2
+    )
     profiles = profiles + 1e-6
     return profiles / profiles.sum(dim=-1, keepdim=True)
 
@@ -36,8 +38,12 @@ class DifferentialObjectiveTests(unittest.TestCase):
         collapsed = observed.mean(0, keepdim=True).repeat(4, 1)
 
         self.assertLess(
-            paired_deviation_loss(correct.log(), observed, slice(0, observed.shape[-1])).item(),
-            paired_deviation_loss(collapsed.log(), observed, slice(0, observed.shape[-1])).item(),
+            paired_deviation_loss(
+                correct.log(), observed, slice(0, observed.shape[-1])
+            ).item(),
+            paired_deviation_loss(
+                collapsed.log(), observed, slice(0, observed.shape[-1])
+            ).item(),
         )
 
 
@@ -58,8 +64,12 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
         before_b = model.nuc_profile_b.detach().clone()
         optimizer = guard.make_optimizer(lr=0.01)
 
-        parameter_ids = {id(parameter) for parameter in optimizer.param_groups[0]["params"]}
-        self.assertEqual(parameter_ids, {id(model.nuc_profile_w), id(model.nuc_profile_b)})
+        parameter_ids = {
+            id(parameter) for parameter in optimizer.param_groups[0]["params"]
+        }
+        self.assertEqual(
+            parameter_ids, {id(model.nuc_profile_w), id(model.nuc_profile_b)}
+        )
         self.assertEqual(optimizer.param_groups[0]["weight_decay"], 0.0)
         self.assertTrue(
             all(
@@ -85,5 +95,41 @@ class AdultProfileHeadGuardTests(unittest.TestCase):
 
         self.assertFalse(torch.equal(before_w[1], model.nuc_profile_w[1]))
         self.assertFalse(torch.equal(before_w[4], model.nuc_profile_w[4]))
-        torch.testing.assert_close(before_w[[0, 2, 3, 5]], model.nuc_profile_w[[0, 2, 3, 5]], rtol=0, atol=0)
-        torch.testing.assert_close(before_b[[0, 2, 3, 5]], model.nuc_profile_b[[0, 2, 3, 5]], rtol=0, atol=0)
+        torch.testing.assert_close(
+            before_w[[0, 2, 3, 5]], model.nuc_profile_w[[0, 2, 3, 5]], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            before_b[[0, 2, 3, 5]], model.nuc_profile_b[[0, 2, 3, 5]], rtol=0, atol=0
+        )
+
+    def test_teardown_and_reconfiguration_replace_prior_gradient_masks(self):
+        torch.manual_seed(11)
+        model = HybridMultiCellModel(
+            n_cell_types=6,
+            inputlen=128,
+            outputlen=20,
+            filters=4,
+            n_dil_layers=1,
+            embed_dim=2,
+            profile_kernel_size=3,
+        )
+        first_guard = configure_adult_profile_finetune(model, adult_indices=[1, 4])
+        first_guard.teardown()
+        first_guard.teardown()
+
+        configure_adult_profile_finetune(model, adult_indices=[1, 4])
+        second_guard = configure_adult_profile_finetune(model, adult_indices=[2, 5])
+        sequence = torch.randn(2, 128, 4)
+        _, _, logits, _ = model(sequence, torch.tensor([2, 5]))
+        F.cross_entropy(logits, torch.tensor([5, 15])).backward()
+
+        self.assertGreater(torch.count_nonzero(model.nuc_profile_w.grad[2]).item(), 0)
+        self.assertGreater(torch.count_nonzero(model.nuc_profile_w.grad[5]).item(), 0)
+        torch.testing.assert_close(
+            model.nuc_profile_w.grad[[1, 4]],
+            torch.zeros_like(model.nuc_profile_w.grad[[1, 4]]),
+            rtol=0,
+            atol=0,
+        )
+        second_guard.teardown()
+        second_guard.teardown()
