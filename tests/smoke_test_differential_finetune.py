@@ -36,43 +36,66 @@ ADULT_INDICES = torch.tensor([1, 2, 3, 4])
 INPUT_LENGTH = 601
 OUTPUT_LENGTH = 503
 DEVIATION_SLICE = slice(1, 502)
+COMMON_MOTIF = "CCCCC"
+CAUSAL_MOTIF = "AAAAA"
+COMMON_MOTIF_SLICE = slice(INPUT_LENGTH // 2 - 2, INPUT_LENGTH // 2 + 3)
+CAUSAL_MOTIF_SLICE = slice(COMMON_MOTIF_SLICE.start - 12, COMMON_MOTIF_SLICE.stop - 12)
+SUPERVISED_INPUT_SLICE = slice(INPUT_LENGTH // 2 - 250, INPUT_LENGTH // 2 + 251)
 
 
 def _sequence(*, shifted: bool, variant: int) -> torch.Tensor:
     bases = np.array(list("ACGT"), dtype="U1")
-    rng = np.random.default_rng(100 + variant % 2)
+    rng = np.random.default_rng(100 + variant)
     sequence = rng.choice(bases, size=INPUT_LENGTH)
-    flank_rng = np.random.default_rng(100 + variant)
-    sequence[:20] = flank_rng.choice(bases, size=20)
-    sequence[-20:] = flank_rng.choice(bases, size=20)
+    sequence[COMMON_MOTIF_SLICE] = list(COMMON_MOTIF)
     if shifted:
-        sequence[INPUT_LENGTH // 2 - 2 : INPUT_LENGTH // 2 + 3] = list("AAAAA")
-    else:
-        sequence[INPUT_LENGTH // 2 - 2 : INPUT_LENGTH // 2 + 3] = list("CCCCC")
+        sequence[CAUSAL_MOTIF_SLICE] = list(CAUSAL_MOTIF)
     return torch.from_numpy(dna_to_one_hot(["".join(sequence)])[0].astype(np.float32))
 
 
-def _gaussian(center: float) -> torch.Tensor:
-    positions = torch.arange(OUTPUT_LENGTH, dtype=torch.float32)
-    profile = torch.exp(-0.5 * ((positions - center) / 5.0) ** 2)
-    return 100.0 * (profile + 1e-5)
+def _configure_causal_checkpoint(model: HybridMultiCellModel) -> None:
+    """Make the frozen trunk expose common and causal five-base motif features."""
+    with torch.no_grad():
+        model.first.weight.zero_()
+        model.first.bias.zero_()
+        model.first.weight[0, 1, 8:13] = 1.0
+        model.first.weight[1, 0, 8:13] = 1.0
+        model.dilated[0].weight.zero_()
+        model.dilated[0].bias.zero_()
+        model.dilated[0].weight[0, 0, 1] = 1.0
+        model.dilated[0].weight[1, 1, 1] = 1.0
+        model.nuc_profile_w.zero_()
+        model.nuc_profile_b.zero_()
+        model.nuc_profile_w[ADULT_INDICES, 0, 1] = 3.0
+        model.nuc_profile_w[1, 1, 1] = -3.0
+
+
+def _teacher_profiles(sequence: torch.Tensor) -> torch.Tensor:
+    """Generate reachable observed profiles from the same causal frozen features."""
+    teacher = HybridMultiCellModel(
+        n_cell_types=len(CELL_TYPES),
+        inputlen=INPUT_LENGTH,
+        outputlen=OUTPUT_LENGTH,
+        filters=4,
+        n_dil_layers=1,
+        embed_dim=2,
+        profile_kernel_size=3,
+    )
+    _configure_causal_checkpoint(teacher)
+    with torch.no_grad():
+        teacher.nuc_profile_w[1, 1, 1] = 3.0
+        indices = ADULT_INDICES
+        repeated = sequence.unsqueeze(0).expand(indices.numel(), -1, -1)
+        return 100.0 * torch.softmax(teacher(repeated, indices)[2], dim=-1)
 
 
 def _paired_example(
     *, shifted: bool, variant: int, locus_id: str
 ) -> PairedContextExample:
-    center = OUTPUT_LENGTH // 2
-    profiles = torch.stack(
-        (
-            _gaussian(center - (12 if shifted else 0)),
-            _gaussian(center),
-            _gaussian(center),
-            _gaussian(center),
-        )
-    )
+    sequence = _sequence(shifted=shifted, variant=variant)
     return PairedContextExample(
-        sequence=_sequence(shifted=shifted, variant=variant),
-        raw_profiles=profiles,
+        sequence=sequence,
+        raw_profiles=_teacher_profiles(sequence),
         checkpoint_indices=ADULT_INDICES,
         observed_calls=torch.tensor([shifted, False, False, False]),
         deviation_slice=DEVIATION_SLICE,
@@ -166,6 +189,7 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 embed_dim=2,
                 profile_kernel_size=3,
             )
+            _configure_causal_checkpoint(model)
             torch.save(
                 {
                     "args": {
@@ -187,6 +211,37 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 checkpoint_path, torch.device("cpu")
             )
 
+        for train_example, validation_example in zip(
+            train_examples, validation_examples, strict=True
+        ):
+            self.assertFalse(
+                torch.equal(train_example.sequence, validation_example.sequence)
+            )
+            self.assertTrue(
+                torch.any(train_example.sequence != validation_example.sequence).item()
+            )
+        train_shifted, validation_shifted = train_examples[1], validation_examples[1]
+        torch.testing.assert_close(
+            train_shifted.sequence[CAUSAL_MOTIF_SLICE],
+            validation_shifted.sequence[CAUSAL_MOTIF_SLICE],
+            rtol=0,
+            atol=0,
+        )
+        central_background = torch.ones(501, dtype=torch.bool)
+        central_background[
+            CAUSAL_MOTIF_SLICE.start
+            - SUPERVISED_INPUT_SLICE.start : CAUSAL_MOTIF_SLICE.stop
+            - SUPERVISED_INPUT_SLICE.start
+        ] = False
+        self.assertTrue(
+            torch.any(
+                (
+                    train_shifted.sequence[SUPERVISED_INPUT_SLICE]
+                    != validation_shifted.sequence[SUPERVISED_INPUT_SLICE]
+                )[central_background]
+            ).item()
+        )
+
         base_model = copy.deepcopy(tuned_model)
         base_metrics = _metrics(base_model, validation_examples)
         with torch.no_grad():
@@ -194,6 +249,7 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 validation_examples[1].sequence.unsqueeze(0), torch.tensor([1])
             )[0].clone()
             base_nonadult_rows = base_model.nuc_profile_w[[0, 5]].clone()
+            base_nonadult_biases = base_model.nuc_profile_b[[0, 5]].clone()
 
         guard = configure_adult_profile_finetune(tuned_model, ADULT_INDICES.tolist())
         optimizer = guard.make_optimizer(lr=1e-2)
@@ -211,7 +267,17 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 lambda_dev=4.0,
                 grad_clip=100.0,
             )
+            self.assertTrue(np.isfinite(result.replay_nll))
             self.assertTrue(np.isfinite(result.total_loss))
+            differential_total = (
+                result.differential_profile_nll + 4.0 * result.deviation_loss
+            )
+            np.testing.assert_allclose(
+                result.total_loss,
+                result.replay_nll + differential_total,
+                rtol=1e-5,
+                atol=1e-5,
+            )
         guard.teardown()
 
         tuned_metrics = _metrics(tuned_model, validation_examples)
@@ -220,6 +286,7 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
                 validation_examples[1].sequence.unsqueeze(0), torch.tensor([1])
             )[0]
             tuned_nonadult_rows = tuned_model.nuc_profile_w[[0, 5]]
+            tuned_nonadult_biases = tuned_model.nuc_profile_b[[0, 5]]
 
         print(
             "DIFFERENTIAL_FINETUNE_METRICS "
@@ -241,6 +308,9 @@ class DifferentialFineTuneSmokeTest(unittest.TestCase):
         )
         torch.testing.assert_close(
             base_nonadult_rows, tuned_nonadult_rows, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            base_nonadult_biases, tuned_nonadult_biases, rtol=0, atol=0
         )
 
 
