@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 import warnings
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -29,6 +30,8 @@ from chrombpnet.multitask.fine_tune_differential_torch import (
     FineTuneConfig,
     RunResult,
     WandbRun,
+    _close_replay_loader,
+    _DatasetCollection,
     _prepare_run,
     aggregate_differential_metrics,
     assert_production_cardinalities,
@@ -847,6 +850,238 @@ class OrchestrationContractTests(unittest.TestCase):
 
 
 class CleanupAndWandbTests(unittest.TestCase):
+    def _call_evaluation(
+        self,
+        root: Path,
+        context_dataset,
+        *,
+        replay_loader=None,
+        replay_error: Exception | None = None,
+        score_error: Exception | None = None,
+        replay_close=None,
+    ):
+        fold = {
+            "train": sorted(APPROVED_TRAIN_CHROMOSOMES),
+            "valid": sorted(APPROVED_VALID_CHROMOSOMES),
+            "test": sorted(APPROVED_TEST_CHROMOSOMES),
+        }
+        fold_path = root / "fold.json"
+        fold_path.write_text(json.dumps(fold))
+        checkpoint = {
+            "cell_types": ["adult_a"],
+            "args": {"inputlen": 600, "outputlen": 502},
+        }
+        tuned_checkpoint = {
+            **checkpoint,
+            "base_checkpoint_sha256": "base-hash",
+        }
+        adult_manifest = pl.DataFrame(
+            {"cell_type": ["adult_a"], "nuc_bw": ["adult_a.bw"]}
+        )
+        replay_kwargs = (
+            {"side_effect": replay_error}
+            if replay_error is not None
+            else {"return_value": replay_loader}
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.load_hybrid_checkpoint",
+                    side_effect=[
+                        (Mock(), checkpoint),
+                        (Mock(), tuned_checkpoint),
+                    ],
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch._sha256",
+                    return_value="base-hash",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.read_manifest",
+                    return_value=Mock(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.read_metadata",
+                    return_value=Mock(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.validate_adult_cohort",
+                    return_value=adult_manifest,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.assert_production_cardinalities"
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.validate_adult_manifest_coverage"
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.map_adult_checkpoint_indices",
+                    return_value={"adult_a": 0},
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.pl.read_parquet",
+                    return_value=pl.DataFrame({"chrom": ["chr3"]}),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.validate_artifact_chromosomes"
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.build_context_units",
+                    return_value=[Mock()],
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.PairedContextDataset",
+                    return_value=context_dataset,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "chrombpnet.multitask.fine_tune_differential_torch.build_adult_replay_loader",
+                    **replay_kwargs,
+                )
+            )
+            if score_error is not None:
+                stack.enter_context(
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch._score_differential",
+                        side_effect=score_error,
+                    )
+                )
+            if replay_close is not None:
+                stack.enter_context(
+                    patch(
+                        "chrombpnet.multitask.fine_tune_differential_torch._close_replay_loader",
+                        side_effect=replay_close,
+                    )
+                )
+            return evaluate_checkpoints(
+                base_checkpoint_path=root / "base.pt",
+                tuned_checkpoint_path=root / "tuned.pt",
+                manifest_path=root / "manifest.tsv",
+                manifest_root=None,
+                metadata_path=root / "metadata.tsv",
+                fold_json=fold_path,
+                calls_path=root / "calls.parquet",
+                genome=root / "genome.fa",
+                out_json=root / "out.json",
+                device_name="cpu",
+                amp=False,
+            )
+
+    def test_replay_cleanup_attempts_every_handle_after_first_close_failure(self):
+        attempted = []
+
+        class CloseSpy:
+            def __init__(self, label: str, fail: bool = False):
+                self.label = label
+                self.fail = fail
+
+            def close(self):
+                attempted.append(self.label)
+                if self.fail:
+                    raise RuntimeError(f"{self.label} failed")
+
+        sources = []
+        labels = []
+        for source_index in range(3):
+            handles = {}
+            for attribute in ("_genome", "_acc_bw", "_nuc_bw"):
+                label = f"{source_index}:{attribute}"
+                labels.append(label)
+                handles[attribute] = CloseSpy(label, fail=not sources and not handles)
+            sources.append(SimpleNamespace(**handles))
+        collection = _DatasetCollection([])
+        collection.datasets = [SimpleNamespace(dataset=source) for source in sources]
+        loader = SimpleNamespace(dataset=collection)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _close_replay_loader(loader)
+
+        self.assertEqual(attempted, labels)
+        for source in sources:
+            for attribute in ("_genome", "_acc_bw", "_nuc_bw"):
+                self.assertIsNone(getattr(source, attribute))
+        self.assertTrue(any("replay handle" in str(item.message) for item in caught))
+
+    def test_evaluation_cleans_context_when_replay_setup_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            context_dataset = Mock()
+            with self.assertRaisesRegex(RuntimeError, "replay setup failed"):
+                self._call_evaluation(
+                    Path(temporary_directory),
+                    context_dataset,
+                    replay_error=RuntimeError("replay setup failed"),
+                )
+            context_dataset.close.assert_called_once_with()
+
+    def test_evaluation_cleanup_failure_does_not_skip_other_resource(self):
+        for failing_resource in ("context", "replay"):
+            with (
+                self.subTest(failing_resource=failing_resource),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                attempted = []
+
+                def close_context(
+                    attempted=attempted,
+                    failing_resource=failing_resource,
+                ):
+                    attempted.append("context")
+                    if failing_resource == "context":
+                        raise RuntimeError("context close failed")
+
+                def close_replay(
+                    _loader,
+                    attempted=attempted,
+                    failing_resource=failing_resource,
+                ):
+                    attempted.append("replay")
+                    if failing_resource == "replay":
+                        raise RuntimeError("replay close failed")
+
+                context_dataset = Mock()
+                context_dataset.close.side_effect = close_context
+                with (
+                    warnings.catch_warnings(record=True) as caught,
+                    self.assertRaisesRegex(RuntimeError, "score failed"),
+                ):
+                    warnings.simplefilter("always")
+                    self._call_evaluation(
+                        Path(temporary_directory),
+                        context_dataset,
+                        replay_loader=Mock(),
+                        score_error=RuntimeError("score failed"),
+                        replay_close=close_replay,
+                    )
+
+                self.assertCountEqual(attempted, ["context", "replay"])
+                self.assertTrue(
+                    any("cleanup failed" in str(item.message) for item in caught)
+                )
+
     def _config(self, root: Path) -> FineTuneConfig:
         paths = {
             name: root / name

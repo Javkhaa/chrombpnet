@@ -777,26 +777,36 @@ def evaluate_checkpoints(
         for row in adult_manifest.iter_rows(named=True)
     }
     args = base_checkpoint["args"]
-    context_dataset = PairedContextDataset(
-        units,
-        genome,
-        nuc_bigwigs,
-        args["inputlen"],
-        args["outputlen"],
-    )
-    replay_loader = build_adult_replay_loader(
-        adult_manifest,
-        checkpoint_index,
-        test_chromosomes,
-        genome,
-        inputlen=args["inputlen"],
-        outputlen=args["outputlen"],
-        batch_size=replay_batch_size,
-        num_workers=num_workers,
-        shuffle=False,
-        seed=0,
-        max_examples=replay_examples,
-    )
+    cleanup = _CleanupStack()
+    try:
+        context_dataset = PairedContextDataset(
+            units,
+            genome,
+            nuc_bigwigs,
+            args["inputlen"],
+            args["outputlen"],
+        )
+        cleanup.callback("evaluation context dataset", context_dataset.close)
+        replay_loader = build_adult_replay_loader(
+            adult_manifest,
+            checkpoint_index,
+            test_chromosomes,
+            genome,
+            inputlen=args["inputlen"],
+            outputlen=args["outputlen"],
+            batch_size=replay_batch_size,
+            num_workers=num_workers,
+            shuffle=False,
+            seed=0,
+            max_examples=replay_examples,
+        )
+        cleanup.callback(
+            "evaluation replay loader",
+            lambda: _close_replay_loader(replay_loader),
+        )
+    except Exception:
+        cleanup.close()
+        raise
     try:
         base_differential = _score_differential(
             base_model, context_dataset, device, amp
@@ -839,8 +849,7 @@ def evaluate_checkpoints(
         _write_json(out_json, report)
         return report
     finally:
-        context_dataset.close()
-        _close_replay_loader(replay_loader)
+        cleanup.close()
 
 
 def _validation_snapshot(
@@ -919,8 +928,16 @@ def _close_replay_loader(loader: DataLoader) -> None:
         for attribute in ("_genome", "_acc_bw", "_nuc_bw"):
             handle = getattr(source, attribute, None)
             if handle is not None:
-                handle.close()
-                setattr(source, attribute, None)
+                try:
+                    handle.close()
+                except Exception as error:  # noqa: BLE001 - close remaining handles
+                    warnings.warn(
+                        f"cleanup failed for replay handle {attribute}: {error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                finally:
+                    setattr(source, attribute, None)
 
 
 def _run_single_finetune_owned(
