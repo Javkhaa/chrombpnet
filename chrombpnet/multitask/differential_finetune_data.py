@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,9 +108,16 @@ def build_context_units(
 
     units: list[ContextUnit] = []
     for (locus_id, tissue_context), rows in groups.items():
-        missing = sorted(
-            {str(row["cell_type"]) for row in rows}.difference(checkpoint_index)
+        cell_types = [str(row["cell_type"]) for row in rows]
+        duplicates = sorted(
+            cell_type for cell_type, count in Counter(cell_types).items() if count > 1
         )
+        if duplicates:
+            raise ValueError(
+                f"locus-context {locus_id!r}, {tissue_context!r} has duplicate "
+                f"cell types: {duplicates}"
+            )
+        missing = sorted(set(cell_types).difference(checkpoint_index))
         if missing:
             raise ValueError(f"depth-qualified calls absent from checkpoint: {missing}")
         rows.sort(key=lambda row: checkpoint_index[str(row["cell_type"])])
@@ -188,6 +196,17 @@ class PairedContextDataset(Dataset):
                 cell: pyBigWig.open(self.nuc_bw_files[cell]) for cell in needed
             }
         return self._genome, self._nuc_bws
+
+    def close(self) -> None:
+        """Close lazy FASTA and BigWig handles and allow later reopening."""
+        genome, bigwigs = self._genome, self._nuc_bws
+        self._genome = None
+        self._nuc_bws = None
+        if bigwigs is not None:
+            for bigwig in bigwigs.values():
+                bigwig.close()
+        if genome is not None:
+            genome.close()
 
     def __getstate__(self):
         state = self.__dict__.copy()
