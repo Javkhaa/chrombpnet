@@ -146,3 +146,88 @@ lineage-relative shift among primary calls is 25 bp. Artifacts are in
 
 These results answer whether mixed-pilot loci remain dynamic in the adult cohort.
 They are not the unbiased adult discovery atlas; Pass 2 remains the next analysis.
+
+
+## Differential fine-tuning runbook
+
+Generate leakage-safe training and validation differential artifacts on NFS:
+
+```bash
+uv run chrombpnet-call-diff-nucleosomes \
+  --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
+  --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train \
+  --chroms chr2 chr4 chr5 chr7 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr21 chr22 chrX chrY \
+  --per-cell-peak-limit 50 --max-loci 5000 --merge-bp 100 \
+  --window 501 --smooth-sigma 20 --max-shift 100 \
+  --min-counts 20 --min-effect 0.05 --min-robust-z 3 \
+  --min-lineage-comparators 3 --chunk-size 32 --cache-loci 100
+
+uv run chrombpnet-call-diff-nucleosomes \
+  --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
+  --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid \
+  --chroms chr8 chr20 --per-cell-peak-limit 50 --max-loci 2000 --merge-bp 100 \
+  --window 501 --smooth-sigma 20 --max-shift 100 \
+  --min-counts 20 --min-effect 0.05 --min-robust-z 3 \
+  --min-lineage-comparators 3 --chunk-size 32 --cache-loci 100
+```
+
+Run the three-lambda pilot from the original hybrid checkpoint:
+
+```bash
+uv run chrombpnet-finetune-diff-nucleosomes train \
+  --checkpoint /mnt/data/jganbat/scatac_corpus/run/model_346_hybrid_long.pt \
+  --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
+  --manifest-root /mnt/data/jganbat/scatac_corpus/staged \
+  --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
+  --genome /mnt/data/jganbat/scatac_corpus/refs/hg38.fa \
+  --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
+  --train-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train/differential_nucleosomes.parquet \
+  --valid-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid/differential_nucleosomes.parquet \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot \
+  --lambda-dev-grid 0.25 1.0 4.0 --pilot-steps 2000 --full-steps 0 \
+  --learning-rate 1e-5 --warmup-steps 100 --grad-clip 1.0 \
+  --validate-every 250 --seed 0 --device cuda --amp \
+  --wandb --wandb-project jg_experiments --wandb-run-name hybrid346_diffnuc_pilot
+```
+
+After the pilot selects a passing lambda, restart the full run from the base checkpoint:
+
+```bash
+uv run chrombpnet-finetune-diff-nucleosomes train \
+  --checkpoint /mnt/data/jganbat/scatac_corpus/run/model_346_hybrid_long.pt \
+  --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
+  --manifest-root /mnt/data/jganbat/scatac_corpus/staged \
+  --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
+  --genome /mnt/data/jganbat/scatac_corpus/refs/hg38.fa \
+  --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
+  --train-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_train/differential_nucleosomes.parquet \
+  --valid-calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_valid/differential_nucleosomes.parquet \
+  --out-dir /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final \
+  --selected-pilot-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/pilot/selected_pilot.json \
+  --pilot-steps 0 --full-steps 10000 --learning-rate 1e-5 \
+  --warmup-steps 100 --grad-clip 1.0 --validate-every 250 \
+  --seed 0 --device cuda --amp --wandb --wandb-project jg_experiments \
+  --wandb-run-name hybrid346_diffnuc_final
+```
+
+The existing 553 test loci in
+`/mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_pilot_rescore/differential_nucleosomes.parquet`
+are rejected by the `train` subcommand. They are accepted only by
+`evaluate --split test`, after final validation gates pass:
+
+```bash
+uv run chrombpnet-finetune-diff-nucleosomes evaluate \
+  --base-checkpoint /mnt/data/jganbat/scatac_corpus/run/model_346_hybrid_long.pt \
+  --tuned-checkpoint /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/final.pt \
+  --manifest /mnt/data/jganbat/scatac_corpus/staged/manifest_adult346.tsv \
+  --manifest-root /mnt/data/jganbat/scatac_corpus/staged \
+  --metadata /mnt/data/jganbat/scatac_corpus/staged/adult_cell_metadata.tsv \
+  --genome /mnt/data/jganbat/scatac_corpus/refs/hg38.fa \
+  --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
+  --calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_pilot_rescore/differential_nucleosomes.parquet \
+  --split test \
+  --out-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final/test_comparison.json \
+  --device cuda --amp
+```
