@@ -175,8 +175,8 @@ uv run chrombpnet-call-diff-nucleosomes \
 
 Run the three-lambda pilot from the original hybrid checkpoint. Preserve the
 existing `pilot`, `pilot_ampfix`, and `final` directories byte-identically as
-superseded audit evidence. After code approval, the corrected pooled-metric sweep
-must write to `pilot_metricfix`. `--amp` is retained only as a CLI compatibility
+superseded audit evidence. The corrected pooled-metric sweep writes to
+`pilot_metricfix`. `--amp` is retained only as a CLI compatibility
 and provenance flag: this feature currently performs no active mixed-precision
 model forward and uses no GradScaler scaling. Every model forward is float32 to
 preserve profile-logit resolution.
@@ -237,39 +237,50 @@ uv run chrombpnet-finetune-diff-nucleosomes evaluate \
   --fold-json /mnt/data/jganbat/scatac_corpus/refs/folds/fold_0.json \
   --calls /mnt/data/jganbat/scatac_corpus/run/adult_diffnuc_pilot_rescore/differential_nucleosomes.parquet \
   --split test \
-  --out-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final_metricfix/corrective_test_comparison.json \
+  --out-json /mnt/data/jganbat/scatac_corpus/run/diffnuc_finetune/final_metricfix/test_comparison.json \
   --device cuda --amp
 ```
 
 ## Fine-tuning outcome
 
-> **Superseded audit evidence:** The results below came from the preserved
-> `pilot_ampfix` and `final` artifacts. Their context-weighted effect and shift
-> summaries did not implement pooled eligible-row metrics. Do not use them as the
-> corrected scientific result; regenerate evidence under `pilot_metricfix` and
-> `final_metricfix` after code approval.
+The authoritative evidence is in `pilot_metricfix` and `final_metricfix`. The
+preserved `pilot`, `pilot_ampfix`, and `final` reports used invalid
+context-weighted aggregation for effect and shift metrics and remain audit
+history only. The corrected three-lambda pilot passed all 24 snapshots and
+selected lambda 4.0 at step 2,000. Its selector SHA-256 is
+`8a21999d9c6f336c15ad6c44060fafaae3bd1b9329a0ff493f0b6c063d6fe9ae`.
 
-The corrected selector supplied lambda 4.0 and provenance only. The 10,000-step
-full run restarted model weights from the original
-`model_346_hybrid_long.pt` checkpoint, not from pilot weights. All 40 validation
-snapshots passed the preservation gates, and step 9,500 maximized validation
-deviation Pearson among passing checkpoints.
+The 10,000-step corrected final restarted from the original base weights. All
+40 validation snapshots passed, and step 9,750 maximized passing deviation
+Pearson. On validation, deviation Pearson improved from 0.246053 to 0.248869,
+effect Spearman from 0.148749 to 0.153022, shift-direction accuracy from
+0.507303 to 0.510080, shift MAE from 27.5797 to 27.5530 bp, and AUPRC from
+0.039484 to 0.040412. AP covered all 29,468 rows with 662 positives; shift
+metrics covered all 9,722 eligible rows. Ordinary nucleosome Pearson changed by
+-0.000013 and NLL by +0.00824, within their gates.
 
-On validation, deviation Pearson improved from 0.246053 to 0.248849, effect
-Spearman from 0.091179 to 0.093419, shift-direction accuracy from 0.508776 to
-0.510972, shift MAE from 25.1846 to 25.1612 bp, and differential AUPRC from
-0.039484 to 0.040289. Ordinary nucleosome Pearson changed by -0.000006 and NLL
-by +0.00930, within their gates. Accessibility outputs were unchanged, all 102
-non-adult rows were bitwise preserved, and every model tensor except the 244
-adult rows of `nuc_profile_w` and `nuc_profile_b` was bitwise unchanged.
+Only the 244 adult rows of `nuc_profile_w` changed. All 102 non-adult rows,
+`nuc_profile_b`, accessibility parameters, count heads, and every other tensor
+were bitwise preserved. The final checkpoint SHA-256 is
+`9fd997d1a36ea43cafa99bfdea116a67a69c82decc5b364e1593c75d3ae698e9`;
+the validation report SHA-256 is
+`46472f3db9ca2e58ebda0fa9c04bb424d230dffccb10d625330471268a36e194`.
+The final W&B run is
+[`2zwf8wzw`](https://wandb.ai/prima-mente/jg_experiments/runs/2zwf8wzw).
 
-The untouched test command was executed once after validation selection. On the
-553-locus challenge set, deviation Pearson improved from 0.204143 to 0.205642,
-effect Spearman from 0.075204 to 0.076543, and shift MAE from 28.8626 to 28.8487
-bp. Shift-direction accuracy decreased from 0.515222 to 0.514865 and AUPRC from
-0.033735 to 0.033697. These mixed changes are tiny. The 553 loci were ascertained
-by an earlier mixed-cell differential screen, and 387 currently have an adult
-differential call; they are not an unbiased genome-wide sample.
+After independent validation approval, the challenge command was executed
+exactly once as a corrective re-evaluation after the aggregation defect. On the
+553-locus ascertained challenge set, deviation Pearson improved from 0.204143 to
+0.205678, effect Spearman from 0.084267 to 0.088297, shift-direction accuracy
+from 0.511687 to 0.511900, and shift MAE from 32.4868 to 32.4802 bp. AUPRC was
+essentially flat, changing from 0.033735 to 0.033704. AP covered all 44,082 rows
+with 983 positives; shift metrics covered all 18,781 eligible rows. The report
+SHA-256 is
+`649a35065680d724d542d6a4cc9df6d9d73f796fae540de65725a9b1608e3b84`.
+
+The corrected effects are small and do not establish broad or material
+improvement. This is not untouched test evidence, the challenge set is not an
+unbiased genome-wide sample, and the checkpoint remains experimental.
 
 See `docs/differential_nucleosome_finetuning_results.md` for exact metrics,
 artifact hashes, W&B provenance, preservation evidence, and limitations.
